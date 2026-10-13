@@ -47,6 +47,8 @@ class Command:
         help_content: str = "",
         is_public: bool = True,
         is_root: bool = False,
+        ai_visible: bool | None = None,
+        elevated: bool = False,
     ):
         self.name = name
         self.description = description
@@ -58,6 +60,8 @@ class Command:
         self.help_content: str = help_content
         self.is_public: bool = is_public
         self.is_root = is_root
+        self.ai_visible = ai_visible
+        self.elevated = elevated
 
 
 class ResolvedCommand:

@@ -12,26 +12,33 @@ from leech.core.parser.token import Token, TokenType
 class CatalogArgument(BaseModel):
     name: str
     type: str
-    required: bool
+    required: bool  # effective: no default and marked required
     description: str = ""
+    default: Any = None
 
 
 class CatalogEntry(BaseModel):
-    command: str # dotted path: "todo.add"
+    command: str  # dotted path: "todo.add"
     description: str
     arguments: list[CatalogArgument] = Field(default_factory=list)
 
 
-class AiAction(BaseModel):
-    """the only shapes the model is allowed to answer with."""
-    command: str | None = None
+class AiCommand(BaseModel):
+    command: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     reply: str | None = None
 
+
+class AiAction(BaseModel):
+    reply: str | None = None
+    commands: list[AiCommand] = Field(
+        default_factory=list, max_length=1
+    )  # stub till v0.0.4
+
     @model_validator(mode="after")
-    def exactly_one(self) -> "AiAction":
-        if self.command is None and self.reply is None:
-            raise ValueError("set either 'command' or 'reply'.")
+    def not_empty(self) -> "AiAction":
+        if not self.commands and self.reply is None:
+            raise ValueError("provide a 'reply' and/or 'commands'.")
         return self
 
 
@@ -39,26 +46,33 @@ Visibility = Callable[[str, Command], bool]
 
 
 def build_catalog(registry, visible: Visibility) -> list[CatalogEntry]:
-    return [
-        CatalogEntry(
-            command=path,
-            description=command.description,
-            arguments=[
+    entries: list[CatalogEntry] = []
+    for path, command in registry.registered_commands.items():
+        if not visible(path, command):
+            continue
+        arguments: list[CatalogArgument] = []
+        for a in command.arguments:
+            default = command.defaults.get(a.name)
+            arguments.append(
                 CatalogArgument(
-                    name=a.name, type=a.type.type.name,
-                    required=a.required, description=a.description,
+                    name=a.name,
+                    type=a.type.type.name,
+                    required=a.required and default is None,
+                    description=a.description,
+                    default=None if default is None else str(default),
                 )
-                for a in command.arguments
-            ],
+            )
+        entries.append(
+            CatalogEntry(
+                command=path, description=command.description, arguments=arguments
+            )
         )
-        for path, command in registry.registered_commands.items()
-        if visible(path, command)
-    ]
+    return entries
 
 
-def action_tokens(action: AiAction) -> list[Token]:
+def action_tokens(command: AiCommand) -> list[Token]:
     tokens: list[Token] = []
-    for name, value in action.arguments.items():
+    for name, value in command.arguments.items():
         tokens.append(Token(TokenType.RAW, name))
         tokens.append(Token(TokenType.ASSIGN, "="))
         tokens.append(Token(TokenType.STR, str(value)))
@@ -74,18 +88,43 @@ def strip_fences(text: str) -> str:
     return text.strip()
 
 
-def system_prompt(persona: str, catalog: list[CatalogEntry]) -> str:
+def catalog_prompt_block(catalog: list[CatalogEntry]) -> str:
+    """the slim wire form shown to the model — argument descriptions are dropped
+    (they dominate token cost; names/types/defaults carry the semantics)."""
+    slim: list[dict] = []
+    for entry in catalog:
+        item: dict = {"command": entry.command, "description": entry.description}
+        if entry.arguments:
+            item["arguments"] = [
+                {
+                    "name": a.name,
+                    "type": a.type,
+                    "required": a.required,
+                    **({"default": a.default} if a.default is not None else {}),
+                }
+                for a in entry.arguments
+            ]
+        slim.append(item)
+    return json.dumps(slim, separators=(",", ":"))
+
+
+def system_prompt(
+    persona: str, catalog: list[CatalogEntry], *, where: str | None = None
+) -> str:
+    header = f"you are chatting in: {where}.\n\n" if where else ""
     return (
-        f"{persona}\n\n"
+        f"{persona}\n\n{header}"
         "you respond with exactly ONE json object and nothing else:\n"
         '- chat: {"reply": "text"}\n'
-        '- run a command: {"command": "todo.add", '
-        '"arguments": {"task": "buy milk"}, "reply": "optional confirmation"}\n'
+        '- run a command: {"commands": [{"command": "todo.add", '
+        '"arguments": {"task": "buy milk"}, "reply": "optional confirmation"}]}\n'
         "rules:\n"
-        "- 'command' is an exact dotted path from the catalog; argument names are exact.\n"
+        "- 'commands' is a list of command objects; at most ONE command per response for now.\n"
+        "- 'command' is an exact dotted path from the catalog.\n"
+        "- 'arguments' is an object mapping exact argument names to string values.\n"
         "- argument values are strings.\n"
+        "- arguments with a 'default' may be omitted; the default applies.\n"
         "- never invent commands or argument names; if nothing fits, just reply.\n"
         "- never claim you did something unless you emitted its command.\n\n"
-        "catalog:\n"
-        + json.dumps([e.model_dump() for e in catalog], separators=(",", ":"))
+        "catalog:\n" + catalog_prompt_block(catalog)
     )

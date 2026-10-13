@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import discord
 from pydantic import ValidationError
-
+import json
+import logging
+import leech.core.helpers.text.splitter as splitter
 from leech.core.cog.cog import Cog
 from leech.core.cog.context import CogContext, Priority
 from leech.core.cog.error import CogError
@@ -12,12 +14,14 @@ from leech.core.command.native.binding import NativeBinding
 from leech.core.command.runtime import Argument, Command
 from leech.core.command.slash.binding import SlashBinding
 from leech.core.command.helpers import is_invocable
+from leech.core.permissions import is_owner
 from leech.core.ai import schema
+from leech.core.ai.audit import ActionLog
 from leech.core.ai.service import AiError, AiService
 import leech.config as config
 from leech.core.error import BaseError
-from leech.core.parser.types.definition import Types
-from leech.core.parser.types.registry import TypesRegistry
+from leech.core.parser.types.registry import Types, TypesRegistry
+_logger = logging.getLogger(__name__)
 
 REPLY_LIMIT = 1990
 ATTEMPTS = 3
@@ -28,30 +32,160 @@ class AiCog(Cog):
         super().__init__(context=context)
         self.context.add_on_load(self.load)
         self.context.add_on_message(Priority.LOW, self.on_message)
-        self.ai = AiService(api_key=config.ai_api_key) # pyright: ignore reason: validated
+        self.ai = AiService(
+            chain=config.ai_chain,
+            keys=config.ai_keys,
+            thinking=config.ai_thinking,
+            read_timeout=config.ai_read_timeout,
+            turn_deadline=config.ai_turn_deadline,
+            window_limit=config.ai_window_limit,
+            window_budget=config.ai_window_budget,
+        )
+        self.log = ActionLog()
 
     async def load(self):
         ai = Command(
             name="ai",
             description="chat with the leech, it can also run commands for you.",
-            usage_example=">ai say add buy milk to my todo",
+            usage_example=">ai talk add buy milk to my todo",
             help_content=(
-                "i will answers to mentions and replies, or `>ai talk`.\n"
-                "when a request maps to a command i will try to run it on your behalf "
+                "i answer mentions and replies, or `>ai talk`.\n"
+                "when a request maps to a command i will try to run it on your behalf."
             ),
             arguments=[],
-            subcommands=(self.get_talk() | self.get_persona() | self.get_clear()
-                         | self.get_off() | self.get_status()),
+            subcommands=(self.get_talk() | self.get_dry() | self.get_persona()
+                         | self.get_model()
+                         | self.get_clear() | self.get_off() | self.get_status()) | self.get_catalog(),
             binding=MockBinding(),
             is_root=True,
         )
         if not self.context.add_command(ai.name, ai):
             raise CogError(f"i failed to load '{ai.name}' command.")
 
+    # ... get_talk / get_dry / get_persona / get_clear / get_off / get_status
+    #     exactly as delivered last round ...
+
+    def get_model(self) -> dict[str, Command]:
+        def leaf(name: str, description: str, handler, arguments=None) -> Command:
+            return Command(name=name, description=description,
+                           arguments=arguments or [], subcommands={},
+                           binding=NativeBinding(handler=handler))
+        return {"model": Command(
+            name="model",
+            description="view and reconfigure my model chain (owner only).",
+            usage_example=">ai model list",
+            help_content=(
+                "the chain is ordered: the first model is the main, the rest are fallbacks "
+                "tried in order. changes persist across restarts. `reset` returns to the "
+                "startup default. `budget` sizes the context window, keep small for "
+                "models with tight TPMs."
+            ),
+            arguments=[], binding=MockBinding(),
+            subcommands={
+                "list": leaf("list", "show the model chain.", self.model_list_handler),
+                "add": leaf("add", "add a model to the chain.",
+                            self.model_add_handler, [
+                    Argument(name="model",
+                             description="provider:model, e.g. groq:openai/gpt-oss-120b.",
+                             usage_example="model=groq:openai/gpt-oss-20b",
+                             type=TypesRegistry.require(Types.STR), required=True),
+                    Argument(name="position", description="insert position (0 = main).",
+                             usage_example="position=0",
+                             type=TypesRegistry.require(Types.INT), required=False)]),
+                "remove": leaf("remove", "remove a model from the chain.",
+                               self.model_remove_handler, [
+                    Argument(name="model", description="the provider:model to remove.",
+                             usage_example="model=gemini:gemini-3.5-flash-lite",
+                             type=TypesRegistry.require(Types.STR), required=True)]),
+                "main": leaf("main", "promote a model to the top of the chain.",
+                             self.model_main_handler, [
+                    Argument(name="model", description="the provider:model to promote.",
+                             usage_example="model=gemini:gemini-3.5-flash-lite",
+                             type=TypesRegistry.require(Types.STR), required=True)]),
+                "reset": leaf("reset", "restore the startup chain.",
+                              self.model_reset_handler),
+                "budget": leaf("budget", "set the context window size (chars).",
+                               self.model_budget_handler, [
+                    Argument(name="chars",
+                             description="total rendered window budget in characters (~4 chars/token).",
+                             usage_example="chars=8000",
+                             type=TypesRegistry.require(Types.INT), required=True)]),
+            })}
+
+    def _require_owner(self, invocation: Invocation) -> None:
+        if not is_owner(invocation.message.author.id):
+            raise CogError("only owner touches my private parts 😁", is_user_error=True)
+
+    def _chain_reply(self, prefix: str) -> str:
+        lines = "\n".join(f"  {line}" for line in self.ai.usage())
+        return f"{prefix}\n{lines}"
+
+    async def model_list_handler(self, invocation: Invocation):
+        await invocation.message.reply(self._chain_reply("model chain:"))
+
+    async def model_add_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        provider, _, model = invocation.arguments["model"].partition(":")
+        position = invocation.arguments.get("position")
+        try:
+            slot = await self.ai.add_slot(provider.strip(), model.strip(), position)
+        except ValueError as e:
+            raise CogError(f"i couldn't add that model. details: {e}", is_user_error=True) from e
+        await invocation.message.reply(self._chain_reply(f"added `{slot.key}`. chain:"))
+
+    async def model_remove_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        try:
+            await self.ai.remove_slot(invocation.arguments["model"].strip())
+        except ValueError as e:
+            raise CogError(f"i couldn't remove that model. details: {e}", is_user_error=True) from e
+        await invocation.message.reply(self._chain_reply("removed. chain:"))
+
+    async def model_main_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        try:
+            await self.ai.promote_slot(invocation.arguments["model"].strip())
+        except ValueError as e:
+            raise CogError(f"i couldn't promote that model. details: {e}", is_user_error=True) from e
+        await invocation.message.reply(self._chain_reply("promoted. chain:"))
+
+    async def model_reset_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        await self.ai.reset_chain()
+        await invocation.message.reply(self._chain_reply("chain reset to startup default:"))
+
+    async def model_budget_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        try:
+            self.ai.set_window_budget(invocation.arguments["chars"])
+        except ValueError as e:
+            raise CogError(f"i couldn't set that budget. details: {e}", is_user_error=True) from e
+        chars = invocation.arguments["chars"]
+        await invocation.message.reply(
+            f"window budget set to {chars} chars (~{chars // 4} tokens).")
+
+    # ... request() / on_message / is_addressed / _reply_snippet / _reply /
+    #     say_handler / dry_handler / persona & clear & off handlers: exactly as
+    #     delivered last round ...
+
+    async def status_handler(self, invocation: Invocation):
+        channel_id = invocation.message.channel.id
+        window = self.ai.window(channel_id)
+        await invocation.message.reply("\n".join([
+            "models:",
+            *(f"  {line}" for line in self.ai.usage()),
+            f"thinking: `{config.ai_thinking}` | read timeout: `{config.ai_read_timeout}s` | turn budget: `{config.ai_turn_deadline}s`",
+            f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
+            f"memory: {window.size()} messages, ~{window.chars()} chars (~{window.chars() // 4} tokens) of a {window.budget()} char budget",
+            f"catalog: {len(self.catalog())} commands",
+            f"active: {'yes' if channel_id in self.ai.active else 'no'}",
+        ]))
+
+
     def get_talk(self) -> dict[str, Command]:
         return {"talk": Command(
             name="talk", description="talk to me directly.",
-            usage_example=">ai talk what's on my todo list?",
+            usage_example=">ai talk what on my todo list?",
             help_content="same as mentioning me, but explicit. i may answer in chat or run a command for you.",
             arguments=[Argument(
                 name="message", description="what to say.",
@@ -59,6 +193,16 @@ class AiCog(Cog):
                 help_content="(dani reference)",
                 type=TypesRegistry.require(Types.STR), required=True)],
             subcommands={}, binding=NativeBinding(handler=self.say_handler))}
+
+    def get_dry(self) -> dict[str, Command]:
+        return {"dry": Command(
+            name="dry", description="show what i would do, without actully doing it.",
+            usage_example=">ai dry add buy milk to my todo",
+            arguments=[Argument(
+                name="message", description="what you would have said.",
+                usage_example="message=add buy milk to my todo",
+                type=TypesRegistry.require(Types.STR), required=True)],
+            subcommands={}, binding=NativeBinding(handler=self.dry_handler))}
 
     def get_persona(self) -> dict[str, Command]:
         def leaf(name: str, description: str, handler, arguments=None) -> Command:
@@ -74,7 +218,12 @@ class AiCog(Cog):
                             self.persona_set_handler, [Argument(
                                 name="prompt", description="the persona instructions.",
                                 usage_example="prompt=you are a pirate",
-                                type=TypesRegistry.require(Types.STR), required=True)]),
+                                type=TypesRegistry.require(Types.STR), required=True),
+                            Argument(
+                                name="reset", description="clear history on change (default: yes).",
+                                usage_example="reset=no",
+                                help_content="set to 'no' to keep the conversation history. i'll mark the change instead.",
+                                type=TypesRegistry.require(Types.BOOL), required=False)]),
                 "show": leaf("show", "show the current persona.", self.persona_get_handler),
                 "clear": leaf("clear", "reset to my default persona (i.e. leech).",
                               self.persona_clear_handler),
@@ -96,12 +245,40 @@ class AiCog(Cog):
 
     def get_status(self) -> dict[str, Command]:
         return {"status": Command(
-            name="status", description="show the my state in this channel.",
+            name="status", description="show my state in this channel.",
             usage_example=">ai status", arguments=[], subcommands={},
             binding=NativeBinding(handler=self.status_handler))}
 
+    def get_catalog(self) -> dict[str, Command]:
+        return {"catalog": Command(
+            name="catalog", description="show the commands i can see and run.",
+            usage_example=">ai catalog",
+            help_content="roughly what i show the model: every visible command "
+                         "with its arguments and defaults.",
+            arguments=[], subcommands={},
+            binding=NativeBinding(handler=self.catalog_handler))}
+
+    async def catalog_handler(self, invocation: Invocation):
+        entries = self.catalog()
+        lines: list[str] = []
+        for entry in entries:
+            args = ", ".join(f"{a.name}: {a.type}" + ("" if a.required else " (optional)")
+                             for a in entry.arguments)
+            lines.append(f"`{entry.command}`"
+                         + (f" [{args}]" if args else "")
+                         + f" — {entry.description}")
+        payload = schema.catalog_prompt_block(entries)
+        lines.append("")
+        lines.append(f"> {len(entries)} commands, {len(payload)} chars "
+                     f"(~{len(payload) // 4} tokens).")
+        message = invocation.message
+        for chunk in splitter.split("\n".join(lines)):
+            message = await message.reply(chunk)
+
     def _visible(self, path: str, command: Command) -> bool:
-        if path.split(".")[0] == "ai":
+        if command.ai_visible is not None: # to be added in v0.0.5 
+            return command.ai_visible
+        if path == "ai.talk":
             return False
         if isinstance(command.binding, SlashBinding):
             return False
@@ -109,6 +286,13 @@ class AiCog(Cog):
 
     def catalog(self) -> list[schema.CatalogEntry]:
         return schema.build_catalog(self.context.client.commands, self._visible)
+
+    def _where(self, message: discord.Message) -> str:
+        channel = message.channel
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            return f"#{channel.name} of guild '{guild.name}'" # pyright: ignore
+        return "a direct message"
 
     async def on_message(self, message: discord.Message):
         client = self.context.client
@@ -124,7 +308,10 @@ class AiCog(Cog):
             self.ai.activate(channel_id)
 
         if not addressed:
-            self.ai.window(channel_id).push(message.author.display_name, message.content)
+            snippet = await self._reply_snippet(message)
+            self.ai.window(channel_id).push(
+                message.author.display_name, message.author.id,
+                message.content, reply=snippet)
             return False, None
 
         content = message.content
@@ -144,10 +331,28 @@ class AiCog(Cog):
                 return True
         return False
 
+    async def _reply_snippet(self, message: discord.Message) -> str | None:
+        ref = message.reference
+        if ref is None:
+            return None
+        resolved = ref.cached_message or getattr(ref, "resolved", None)
+        if resolved is None and ref.message_id is not None:
+            try:
+                resolved = await message.channel.fetch_message(ref.message_id)
+            except discord.HTTPException:
+                return None
+        if not isinstance(resolved, discord.Message) or not resolved.content.strip():
+            return None
+        snippet = " ".join(resolved.content.split())[:120]
+        return f"{resolved.author.display_name}: {snippet}"
+
     async def request(self, message: discord.Message, content: str, *,
-                      chain=None) -> Invocation | None:
-        system = schema.system_prompt(self.ai.persona(message.channel.id), self.catalog())
+                      dry: bool = False) -> Invocation | None:
+        system = schema.system_prompt(
+            self.ai.persona(message.channel.id), self.catalog(),
+            where=self._where(message))
         feedback: str | None = None
+        snippet = await self._reply_snippet(message)
 
         for _ in range(ATTEMPTS):
             prompt = content if feedback is None else feedback
@@ -155,43 +360,64 @@ class AiCog(Cog):
             try:
                 async with message.channel.typing():
                     raw = await self.ai.chat(
-                        message.channel.id, author, prompt, system=system)
+                        message.channel.id, author, message.author.id, prompt,
+                        system=system, reply=snippet)
             except AiError as e:
+                self.log.write(kind="error", principal=message.author.id, note=e.message)
                 await message.reply(f"i couldn't generate a proper response 😟 details: {e.message}")
                 return None
 
             try:
                 action = schema.AiAction.model_validate_json(schema.strip_fences(raw))
             except ValidationError as e:
+                _logger.warning("ai output rejected: %.500s — error: %s", raw, e)
                 feedback = (f"(system) your output was invalid for the schema: {e}. "
                             "respond with corrected JSON only.")
                 continue
 
-            if action.command is None:
-                await self._reply(message, action.reply or "…")
+            if not action.commands:
+                if dry:
+                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n(dry run - nothing executed.)")
+                    self.log.write(kind="dry", principal=message.author.id, note="chat")
+                else:
+                    await self._reply(message, action.reply or "…")
                 return None
 
-            command = self.context.client.commands.get_command(action.command)
+            requested = action.commands[0]
+            command = self.context.client.commands.get_command(requested.command)
             if command is None:
-                feedback = (f"(system) command '{action.command}' does not exist. "
+                feedback = (f"(system) command '{requested.command}' does not exist. "
                             "use exact paths from the catalog; respond with "
                             "corrected JSON or a reply.")
                 continue
 
+            if dry:
+                preview = (f"```json\n{action.model_dump_json(indent=2)}\n```\n"
+                           f"→ would run: `{requested.command}` "
+                           f"with: {', '.join(f'{k}={v!r}' for k, v in requested.arguments.items()) or 'no arguments'}\n"
+                           f"(dry run — nothing executed.)")
+                await self._reply(message, preview)
+                self.log.write(kind="dry", principal=message.author.id,
+                               command=requested.command, arguments=requested.arguments)
+                return None
+
             try:
-                inner = Invocation.parse(
-                        message=message, command=command,
-                    tokens=schema.action_tokens(action),
-                    chain=chain, via="ai")
+                inner = Invocation.parse(  # the production parser validates everything
+                    message=message, command=command,
+                    tokens=schema.action_tokens(requested),
+                    via="ai")
             except BaseError as e:
                 feedback = (f"(system) that invocation is invalid: {e.message}. "
                             "respond with corrected JSON or just a reply.")
                 continue
 
-            if action.reply:
-                await self._reply(message, action.reply)
+            if requested.reply or action.reply:
+                await self._reply(message, (requested.reply or action.reply)) # pyright: ignore
+            self.log.write(kind="run", principal=message.author.id,
+                           command=requested.command, arguments=requested.arguments)
             return inner
 
+        self.log.write(kind="denied", principal=message.author.id, note="no valid action after retries")
         await message.reply("i couldn't turn that into a command 😟")
         return None
 
@@ -201,14 +427,26 @@ class AiCog(Cog):
 
     async def say_handler(self, invocation: Invocation):
         self.ai.activate(invocation.message.channel.id)
-        return await self.request(
-            invocation.message, invocation.arguments["message"],
-            chain=invocation.chain)
+        return await self.request(invocation.message, invocation.arguments["message"])
+
+    async def dry_handler(self, invocation: Invocation):
+        self.ai.activate(invocation.message.channel.id)
+        await self.request(invocation.message, invocation.arguments["message"], dry=True)
+        return None
 
     async def persona_set_handler(self, invocation: Invocation):
-        self.ai.window(invocation.message.channel.id).clear()
-        self.ai.set_persona(invocation.message.channel.id, invocation.arguments["prompt"])
-        await invocation.message.reply("persona set for this channel and history cleared.")
+        channel_id = invocation.message.channel.id
+        reset = invocation.arguments.get("reset", True)
+        self.ai.set_persona(channel_id, invocation.arguments["prompt"])
+        if reset:
+            self.ai.window(channel_id).clear()
+            await invocation.message.reply("persona set, history cleared.")
+        else:
+            self.ai.window(channel_id).push(
+                "(system)", 0,
+                "(the persona has been changed; ignore any earlier personality "
+                "in this conversation and follow the new one.)")
+            await invocation.message.reply("persona set (history kept, change marked).")
 
     async def persona_get_handler(self, invocation: Invocation):
         await invocation.message.reply(self.ai.persona(invocation.message.channel.id))
@@ -220,21 +458,11 @@ class AiCog(Cog):
 
     async def clear_handler(self, invocation: Invocation):
         self.ai.window(invocation.message.channel.id).clear()
-        await invocation.message.reply("but, its all history stoopid stoopid man 😢🇧🇷.")
+        await invocation.message.reply("ok, but, its all history stoopid stoopid man 😢🇧🇷.")
 
     async def off_handler(self, invocation: Invocation):
         self.ai.deactivate(invocation.message.channel.id)
-        await invocation.message.reply("ok, i'll forget this channel. mention me to start over.")
-
-    async def status_handler(self, invocation: Invocation):
-        channel_id = invocation.message.channel.id
-        await invocation.message.reply("\n".join([
-            f"model: `{self.ai.model}`",
-            f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
-            f"memory: {self.ai.window(channel_id).size()} messages",
-            f"active: {'yes' if channel_id in self.ai.active else 'no'}",
-        ]))
-
+        await invocation.message.reply("ok, but, its all history stoopid stoopid man 😢🇧🇷.")
 
 def create_cog(context: CogContext):
     return AiCog(context=context)
