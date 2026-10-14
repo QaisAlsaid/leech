@@ -9,7 +9,8 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
+import base64
 
 import httpx
 
@@ -58,6 +59,16 @@ class Turn:
     is_bot: bool = False
     was_replying_to: Optional[str] = None
 
+
+@dataclass
+class Attachment:
+    """one downloaded attachment. viewable => travels to the model as image
+    parts (vision slots only); otherwise it becomes a text note."""
+    filename: str
+    content_type: Optional[str]
+    size: int
+    data: bytes
+    viewable: bool
 
 class ContextWindow:
     def __init__(self, limit: int = 60, budget: int = 8_000, turn_cap: int = 800):
@@ -122,6 +133,7 @@ class Generation:
 
 class Provider(ABC):
     name: str = "?"
+    vision: bool = False
 
     def __init__(self, api_key: str, *, read_timeout: float = 20.0):
         self._key = api_key
@@ -147,10 +159,11 @@ class Provider(ABC):
             return str(response.status_code)
 
     async def complete(self, model: str, *, system: str,
-                       turns: list[tuple[bool, str]], generation: Generation) -> str:
-        url, headers, body = self._request(model, system, turns, generation)
+                       turns: list[tuple[bool, str]], generation: Generation,
+                       attachments: Sequence[Attachment] = ()) -> str:
+        url, headers, body = self._request(model, system, turns, generation, attachments)
         response = await self._post(url, headers, body)
-        if response.status_code >= 400:  # safety net; _post handles the real cases
+        if response.status_code >= 400:
             raise ProviderError(response.status_code,
                                 f"{self.name} answered {self._detail(response)}")
         try:
@@ -181,12 +194,22 @@ class Provider(ABC):
 
 class GeminiProvider(Provider):
     name = "gemini"
+    vision = True
 
-    def _request(self, model, system, turns, generation):
-        contents = [
-            {"role": "model" if is_bot else "user", "parts": [{"text": text}]}
-            for is_bot, text in turns
-        ]
+    def _request(self, model, system, turns, generation, attachments=()):
+        last = len(turns) - 1
+        contents = []
+        for index, (is_bot, text) in enumerate(turns):
+            parts: list[dict] = [{"text": text}]
+            if attachments and index == last and not is_bot:
+                for att in attachments:
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": att.content_type or "image/png",
+                            "data": base64.b64encode(att.data).decode("ascii"),
+                        }
+                    })
+            contents.append({"role": "model" if is_bot else "user", "parts": parts})
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": contents,
@@ -196,7 +219,7 @@ class GeminiProvider(Provider):
                 "temperature": generation.temperature,
             },
         }
-        headers = {"x-goog-api-key": self._key}   # never in a URL, never in logs
+        headers = {"x-goog-api-key": self._key}
         return GEMINI_API.format(model=model), headers, body
 
     def _extract(self, data: dict) -> str:
@@ -208,17 +231,28 @@ class GeminiProvider(Provider):
 
 
 class OpenAICompatProvider(Provider):
-    """groq today; ollama or any openai-compatible endpoint later."""
+    """groq today; ollama or any openai-compatible endpoint later.
+    vision stays False — gpt-oss is text-only. if you ever add a vision model
+    here (e.g. a llama-4 variant), flip this or subclass."""
 
     def __init__(self, name: str, api_key: str, base_url: str, **kwargs):
         super().__init__(api_key, **kwargs)
         self.name = name
         self._base = base_url.rstrip("/")
 
-    def _request(self, model, system, turns, generation):
+    def _request(self, model, system, turns, generation, attachments=()):
         messages: list[dict] = [{"role": "system", "content": system}]
-        for is_bot, text in turns:
-            messages.append({"role": "assistant" if is_bot else "user", "content": text})
+        last = len(turns) - 1
+        for index, (is_bot, text) in enumerate(turns):
+            content: object = text
+            if attachments and index == last and not is_bot:   # defensive; engine routes away
+                content = [{"type": "text", "text": text}]
+                for att in attachments:
+                    b64 = base64.b64encode(att.data).decode("ascii")
+                    mime = att.content_type or "image/png"
+                    content.append({"type": "image_url",
+                                    "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            messages.append({"role": "assistant" if is_bot else "user", "content": content})
         body: dict = {
             "model": model,
             "messages": messages,
@@ -398,41 +432,75 @@ class AiService:
             lines.append(f"`{slot.key}`{mark}: {state}")
         return lines
 
-    # -- the chain execution ------------------------------------------------------
     async def chat(self, channel_id: int, author: str, author_id: int, content: str, *,
-                   system: str, reply: Optional[str] = None) -> str:
+                   system: str, reply: Optional[str] = None,
+                   attachments: Sequence[Attachment] = ()) -> str:
         lock = self._locks.setdefault(channel_id, asyncio.Lock())
         async with lock:  # one in-flight request per channel
+            # -- attachment handling & vision routing --------------------------------
+            viewable = [a for a in attachments if a.viewable]
+            notes = [self._note(a) for a in attachments if not a.viewable]
+            ready_vision: list[Slot] = []
+            if viewable:
+                now = time.monotonic()
+                ready_vision = [s for s in self._slots if s.provider.vision
+                                and now >= self._cooldowns.get(s.key, 0.0)]
+                if not ready_vision:
+                    notes += [f"(image '{a.filename}' — no vision-capable model ready, not shown)"
+                              for a in viewable]
+                    viewable = []
+            if notes:
+                content = f"{content}\n" + "\n".join(notes)
+
             window = self.window(channel_id)
             window.push(author, author_id, content, reply=reply)
-            turns = window.render()
-            failures: list[str] = []
 
-            for slot in self._slots:
-                if time.monotonic() < self._cooldowns.get(slot.key, 0.0):
-                    failures.append(f"{slot.key}: cooling")
-                    continue
+            if viewable and ready_vision:
                 try:
-                    text = await asyncio.wait_for(
-                        slot.provider.complete(slot.model, system=system, turns=turns,
-                                               generation=self._generation),
-                        timeout=self._deadline)
-                except ProviderError as e:
-                    if e.rate_limited:
-                        self._cooldowns[slot.key] = time.monotonic() + self._cooldown
-                    _logger.warning("ai slot failed: %s: %s", slot.key, e.message)
-                    failures.append(f"{slot.key}: {e.message}")
-                    continue
-                except asyncio.TimeoutError:
+                    return await self._attempt(ready_vision, window.render(),
+                                               viewable, system, window)
+                except AiError as e:
+                    _logger.warning("vision slots failed (%s) — degrading to text-only", e.message)
+                    window.push("(system)", 0,
+                                "(the attached image could not be processed; answering "
+                                "without seeing it)")
+            return await self._attempt(list(self._slots), window.render(), [], system, window)
+
+    async def _attempt(self, slots: list[Slot], turns: list[tuple[bool, str]],
+                       attachments: Sequence[Attachment], system: str,
+                       window: ContextWindow) -> str:
+        failures: list[str] = []
+        for slot in slots:
+            if time.monotonic() < self._cooldowns.get(slot.key, 0.0):
+                failures.append(f"{slot.key}: cooling")
+                continue
+            try:
+                text = await asyncio.wait_for(
+                    slot.provider.complete(slot.model, system=system, turns=turns,
+                                           generation=self._generation,
+                                           attachments=attachments),
+                    timeout=self._deadline)
+            except ProviderError as e:
+                if e.rate_limited:
                     self._cooldowns[slot.key] = time.monotonic() + self._cooldown
-                    _logger.warning("ai slot timed out: %s", slot.key)
-                    failures.append(f"{slot.key}: exceeded {self._deadline:.0f}s turn deadline")
-                    continue
-                window.push("leech", 0, text, is_bot=True)
-                return text
+                _logger.warning("ai slot failed: %s: %s", slot.key, e.message)
+                failures.append(f"{slot.key}: {e.message}")
+                continue
+            except asyncio.TimeoutError:
+                self._cooldowns[slot.key] = time.monotonic() + self._cooldown
+                _logger.warning("ai slot timed out: %s", slot.key)
+                failures.append(f"{slot.key}: exceeded {self._deadline:.0f}s turn deadline")
+                continue
+            window.push("leech", 0, text, is_bot=True)
+            return text
+        raise AiError("every model failed. " + "; ".join(failures) + ".")
 
-            raise AiError("every model failed. " + "; ".join(failures) + ".")
-
+    @staticmethod
+    def _note(a: Attachment) -> str:
+        size = (f"{a.size / 1024:.0f} KB" if a.size < 1024 * 1024
+                else f"{a.size / (1024 * 1024):.1f} MB")
+        return f"(attachment: '{a.filename}', {a.content_type or 'unknown type'}, {size} — not viewable by me)"
+   
     # -- persistence --------------------------------------------------------------
     def _load(self) -> None:
         self._store.parent.mkdir(parents=True, exist_ok=True)

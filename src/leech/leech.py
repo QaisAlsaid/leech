@@ -13,10 +13,12 @@ from leech.core.parser.types.registry import (
 import leech.core.parser.lexer as lexer
 import leech.core.log
 from . import config
+from leech.core.security import Security
 
 _logger = logging.getLogger(__name__)
 
 COGS = [
+    "leech.cogs.auth.cog",
     "leech.cogs.ping.cog",
     "leech.cogs.sudo.cog",
     "leech.cogs.command.cog",
@@ -37,6 +39,7 @@ class Leech(discord.Client):
         self.prefixes: list[str] = config.prefixes
         self.mention_trigger = False
         self.cogs: CogManager = CogManager(client=self)
+        self.security: Security = Security(config.owner_ids)
 
     async def setup_hook(self):
         for path in COGS:

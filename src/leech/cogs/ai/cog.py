@@ -16,8 +16,9 @@ from leech.core.command.helpers import is_invocable
 from leech.core.permissions import is_owner
 from leech.core.ai import schema
 from leech.core.ai.audit import ActionLog
-from leech.core.ai.service import AiError, AiService
+from leech.core.ai.service import AiError, AiService, Attachment
 from leech.core.helpers.interactions import harvest
+from leech.core.helpers.attachments.attachments import gather_attachments
 import leech.config as config
 from leech.core.error import BaseError
 from leech.core.parser.types.registry import Types, TypesRegistry
@@ -32,7 +33,8 @@ REPLY_LIMIT = 1990
 ATTEMPTS = 3
 MAX_ROUNDS = 3
 MODEL_CALL_BUDGET = 4
-
+MAX_ATTACHMENTS = 4
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024   # base64 inflates ~33% (gemini inline is fine with this)
 
 class AiCog(Cog):
     def __init__(self, context: CogContext):
@@ -64,7 +66,7 @@ class AiCog(Cog):
                 "when a request maps to a command i will try to run it on your behalf."
             ),
             arguments=[],
-            subcommands=(self.get_talk() | self.get_dry() | self.get_persona()
+            subcommands=(self.get_talk() | self.get_perms() | self.get_dry() | self.get_persona()
                          | self.get_model() | self.get_catalog()
                          | self.get_clear() | self.get_off() | self.get_status()),
             binding=MockBinding(),
@@ -77,10 +79,10 @@ class AiCog(Cog):
     #     get_off / get_status: UNCHANGED from your current file — keep yours ...
 
     def get_model(self) -> dict[str, Command]:
-        def leaf(name: str, description: str, handler, arguments=None) -> Command:
+        def leaf(name: str, description: str, handler, arguments=None, elevated: bool = False) -> Command:
             return Command(name=name, description=description,
                            arguments=arguments or [], subcommands={},
-                           binding=NativeBinding(handler=handler))
+                           binding=NativeBinding(handler=handler), elevated=elevated)
         return {"model": Command(
             name="model",
             description="view and reconfigure my model chain (owner only).",
@@ -102,19 +104,19 @@ class AiCog(Cog):
                              type=TypesRegistry.require(Types.STR), required=True),
                     Argument(name="position", description="insert position (0 = main).",
                              usage_example="position=0",
-                             type=TypesRegistry.require(Types.INT), required=False)]),
+                             type=TypesRegistry.require(Types.INT), required=False)], elevated=True),
                 "remove": leaf("remove", "remove a model from the chain.",
                                self.model_remove_handler, [
                     Argument(name="model", description="the provider:model to remove.",
                              usage_example="model=gemini:gemini-3.5-flash-lite",
-                             type=TypesRegistry.require(Types.STR), required=True)]),
+                             type=TypesRegistry.require(Types.STR), required=True)], elevated=True),
                 "main": leaf("main", "promote a model to the top of the chain.",
                              self.model_main_handler, [
                     Argument(name="model", description="the provider:model to promote.",
                              usage_example="model=gemini:gemini-3.5-flash-lite",
-                             type=TypesRegistry.require(Types.STR), required=True)]),
+                             type=TypesRegistry.require(Types.STR), required=True)], elevated=True),
                 "reset": leaf("reset", "restore the startup chain.",
-                              self.model_reset_handler),
+                              self.model_reset_handler, elevated=True),
                 "budget": leaf("budget", "set the context window size (chars).",
                                self.model_budget_handler, [
                     Argument(name="chars",
@@ -122,6 +124,63 @@ class AiCog(Cog):
                              usage_example="chars=8000",
                              type=TypesRegistry.require(Types.INT), required=True)]),
             })}
+
+    def get_perms(self) -> dict[str, Command]:
+        def leaf(name, description, handler, arguments=None):
+            return Command(name=name, description=description,
+                           arguments=arguments or [], subcommands={},
+                           binding=NativeBinding(handler=handler))
+        command_arg = Argument(
+            name="command", description="the command path (or pattern like todo.*) to configure.",
+            usage_example="command=todo.discard", type=TypesRegistry.require(Types.STR),
+            required=True)
+        user_arg = Argument(
+            name="user", description="whose delegation to edit (owner only, defaults to your id).",
+            usage_example="user=@opposingfork", type=TypesRegistry.require(Types.USER),
+            required=False)
+        return {"perms": Command(
+            name="perms", description="configure what i may run for you.",
+            usage_example=">ai perms deny command=todo.discard",
+            arguments=[], binding=MockBinding(),
+            subcommands={
+                "list": leaf("list", "show your delegation rules.",
+                             self.perms_list_handler, [user_arg]),
+                "deny": leaf("deny", "deny the assistant a command for you.",
+                             self.perms_deny_handler, [command_arg, user_arg]),
+                "allow": leaf("allow", "reallow a denied command.",
+                              self.perms_allow_handler, [command_arg, user_arg]),
+            })}
+
+    def _delegation_target(self, invocation: Invocation) -> int:
+        user = invocation.arguments.get("user")
+        if user is not None and user != invocation.message.author.id:
+            if not is_owner(invocation.message.author.id):
+                raise CogError("only my owner may configure someone else's delegation.",
+                               is_user_error=True)
+            return user
+        return invocation.message.author.id
+
+    async def perms_list_handler(self, invocation: Invocation):
+        target = self._delegation_target(invocation)
+        entries = self.context.client.security.delegations_of(target)
+        if not entries:
+            await invocation.message.reply("the assistant may run everything you can (default).")
+            return
+        lines = [f"`{scope}`: {'allowed' if allow else 'denied'}"
+                 for scope, allow in sorted(entries.items())]
+        await invocation.message.reply("\n".join(lines))
+
+    async def perms_deny_handler(self, invocation: Invocation):
+        target = self._delegation_target(invocation)
+        path = invocation.arguments["command"].strip()
+        self.context.client.security.deny_delegation(target, f"command:{path}")
+        await invocation.message.reply(f"the assistant may no longer run `{path}` for <@{target}>.")
+
+    async def perms_allow_handler(self, invocation: Invocation):
+        target = self._delegation_target(invocation)
+        path = invocation.arguments["command"].strip()
+        self.context.client.security.allow_delegation(target, f"command:{path}")
+        await invocation.message.reply(f"the assistant may run `{path}` for <@{target}> again.")
 
     def _require_owner(self, invocation: Invocation) -> None:
         if not is_owner(invocation.message.author.id):
@@ -210,25 +269,33 @@ class AiCog(Cog):
                          "with its arguments and defaults.",
             arguments=[], subcommands={},
             binding=NativeBinding(handler=self.catalog_handler))}
-   
-   # -- catalog (your policy, preserved; P4 makes it config-driven) --------------
-    def _visible(self, path: str, command: Command) -> bool:
+
+    def _visible(self, path: str, command: Command, user_id: int) -> bool:
         if command.ai_visible is not None:
             return command.ai_visible
-        if path == "ai.talk":           # reentrancy: no second model turn
+        if command.elevated:
+            return False                 # the assistant can never elevate
+        if path == "ai.talk":            # reentrancy latch (structural backup)
             return False
+        if path.split(".")[0] == "sudo":
+            return False                 # the elevation grantor
         if isinstance(command.binding, SlashBinding):
             return False
-        return is_invocable(command.binding)
+        if not is_invocable(command.binding):
+            return False
+        return self.context.client.security.decide_ai(
+            user_id, f"command:{path}").allowed     # menu = may-run-for-this-user
 
-    def catalog(self) -> list[schema.CatalogEntry]:
-        return schema.build_catalog(self.context.client.commands, self._visible)
-
+    def catalog(self, user_id: int) -> list[schema.CatalogEntry]:
+        return schema.build_catalog(
+            self.context.client.commands,
+            lambda path, command: self._visible(path, command, user_id))
+ 
     def _where(self, message: discord.Message) -> str:
         channel = message.channel
         guild = getattr(channel, "guild", None)
         if guild is not None:
-            return f"#{channel.name} of guild '{guild.name}'"
+            return f"#{channel.name} of guild '{guild.name}'" # pyright: ignore
         return "a direct message"
 
     # -- listener -------------------------------------------------------------------
@@ -253,14 +320,14 @@ class AiCog(Cog):
             return False, None
 
         content = message.content
-        for form in (f"<@{client.user.id}>", f"<@!{client.user.id}>"):
+        for form in (f"<@{client.user.id}>", f"<@!{client.user.id}>"): # pyright: ignore
             content = content.replace(form, " ")
         await self.request(message, content.strip() or "hi")
         return True, None   # commands now run inside request() via the front door
 
     def is_addressed(self, message: discord.Message) -> bool:
         client = self.context.client
-        if client.user.mentioned_in(message):
+        if client.user.mentioned_in(message): # pyright: ignore
             return True
         ref = message.reference
         if ref is not None:
@@ -285,13 +352,33 @@ class AiCog(Cog):
         snippet = " ".join(resolved.content.split())[:120] # pyright: ignore
         return f"{resolved.author.display_name}: {snippet}" # pyright: ignore
 
+    async def _gather_attachments(self, message: discord.Message) -> list[Attachment]:
+        """direct + replied-to; downloads, caps count/size, marks viewability."""
+        out: list[Attachment] = []
+        for att in await gather_attachments(message):
+            if len(out) >= MAX_ATTACHMENTS:
+                break
+            try:
+                data = await att.read()
+            except discord.HTTPException:
+                continue
+            out.append(Attachment(
+                filename=att.filename or "attachment",
+                content_type=att.content_type,
+                size=att.size,
+                data=data,
+                viewable=(att.content_type or "").lower().startswith("image/")
+                         and len(data) <= MAX_ATTACHMENT_BYTES))
+        return out
+
     # -- the agent loop: emit -> run -> collect -> refeed -> reply --------------------
     async def request(self, message: discord.Message, content: str, *,
                       dry: bool = False) -> None:
         channel_id = message.channel.id
-        system = schema.system_prompt(self.ai.persona(channel_id), self.catalog(),
+        system = schema.system_prompt(self.ai.persona(channel_id), self.catalog(message.author.id),
                                       where=self._where(message))
         snippet = await self._reply_snippet(message)
+        attachments = await self._gather_attachments(message)
         carried = content
         calls = 0
         summary: list[str] = []   # accumulated results across rounds (for wrap-up)
@@ -310,7 +397,10 @@ class AiCog(Cog):
                 try:
                     async with message.channel.typing():
                         raw = await self.ai.chat(channel_id, author, message.author.id,
-                                                 prompt, system=system, reply=snippet)
+                                                 prompt, system=system, reply=snippet,
+                                                 attachments=(attachments
+                                                              if round_index == 0 and feedback is None
+                                                              else ()))
                 except AiError as e:
                     self.log.write(kind="error", principal=message.author.id, note=e.message)
                     await message.reply(f"i couldn't generate a proper response 😟 details: {e.message}")
@@ -331,7 +421,7 @@ class AiCog(Cog):
             # -- pure chat: done --------------------------------------------------
             if not action.commands:
                 if dry:
-                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n(dry run — nothing executed.)")
+                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n(dry run - nothing executed.)")
                     self.log.write(kind="dry", principal=message.author.id, note="chat")
                 else:
                     await self._reply(message, action.reply or "…")
@@ -350,7 +440,7 @@ class AiCog(Cog):
                     self.log.write(kind="denied", principal=message.author.id,
                                    command=requested.command, note="unknown command")
                     continue
-                if not self._visible(requested.command, command):
+                if not self._visible(requested.command, command, message.author.id):
                     results.append(f"(error) '{requested.command}' is not available to you")
                     self.log.write(kind="denied", principal=message.author.id,
                                    command=requested.command, note="not in ai catalog")
@@ -368,7 +458,7 @@ class AiCog(Cog):
 
                 if dry:
                     args = ", ".join(f"{k}={v!r}" for k, v in requested.arguments.items()) or "no arguments"
-                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n→ would run: `{requested.command}` with: {args}\n(dry run — nothing executed.)")
+                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n→ would run: `{requested.command}` with: {args}\n(dry run - nothing executed.)")
                     self.log.write(kind="dry", principal=message.author.id,
                                    command=requested.command, arguments=requested.arguments)
                     return
@@ -412,7 +502,7 @@ class AiCog(Cog):
                               marker_id: int) -> list[str]:
         """post-run sweep of our own messages — captures every command's output,
         because everything a command shows the user is sent by leech."""
-        me = self.context.client.user.id
+        me = self.context.client.user.id # pyright: ignore
         texts: list[str] = []
         after = discord.Object(id=marker_id)
         try:
@@ -446,7 +536,7 @@ class AiCog(Cog):
 
     
     async def catalog_handler(self, invocation: Invocation):
-        entries = self.catalog()
+        entries = self.catalog(invocation.message.author.id)
         lines: list[str] = []
         for entry in entries:
             args = ", ".join(f"{a.name}: {a.type}" + ("" if a.required else " (optional)")
@@ -472,7 +562,7 @@ class AiCog(Cog):
             f"thinking: `{config.ai_thinking}` | read timeout: `{config.ai_read_timeout}s` | turn budget: `{config.ai_turn_deadline}s`",
             f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
             f"memory: {window.size()} messages, ~{window.chars()} chars (~{window.chars() // 4} tokens) of a {window.budget()} char budget",
-            f"catalog: {len(self.catalog())} commands",
+            f"catalog: {len(self.catalog(invocation.message.author.id))} commands",
             f"active: {'yes' if channel_id in self.ai.active else 'no'}",
         ]))
 

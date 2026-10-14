@@ -10,6 +10,7 @@ class Types(str, Enum):
     STR = "str"
     USER = "user"
     CHANNEL = "channel"
+    ATTACHMENT = "attachment"
 
 
 class Cardinality(Enum):

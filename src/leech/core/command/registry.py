@@ -1,6 +1,8 @@
-from .runtime import Command
-import logging
 import re
+
+from .runtime import Command
+
+import logging
 
 _logger = logging.getLogger(__name__)
 
@@ -14,9 +16,11 @@ def is_valid_identifier(s: str) -> bool:
 class CommandRegistry:
     def __init__(self):
         self.registered_commands: dict[str, Command] = {}
-        self._paths: dict[int, str] = (
-            {}
-        )  # id(Command) -> path (reverse index, P4 reads it)
+        # id(Command) -> [paths]. self-bindings share child objects with their
+        # target, so aliases append a second path. the canonical root always
+        # registers FIRST (bind_self requires the target to exist) — so
+        # paths[0] is canonical and path_of is alias-proof.
+        self._paths: dict[int, list[str]] = {}
 
     def register_command(self, path: str, cmd: Command) -> bool:
         if not is_valid_identifier(path):
@@ -46,7 +50,7 @@ class CommandRegistry:
 
         for staged_path, staged_cmd in staged:
             self.registered_commands[staged_path] = staged_cmd
-            self._paths[id(staged_cmd)] = staged_path
+            self._paths.setdefault(id(staged_cmd), []).append(staged_path)
             _logger.debug(f"registered command: '{staged_path}'.")
         return True
 
@@ -55,7 +59,11 @@ class CommandRegistry:
         if cmd is None:
             _logger.error(f"failed to unregister command: '{path}'.")
             return None
-        self._paths.pop(id(cmd), None)
+        paths = self._paths.get(id(cmd), [])
+        if path in paths:
+            paths.remove(path)
+            if not paths:
+                self._paths.pop(id(cmd), None)
         for name, child in cmd.subcommands.items():
             self.unregister_command(f"{path}.{name}")
         return cmd
@@ -64,4 +72,5 @@ class CommandRegistry:
         return self.registered_commands.get(path)
 
     def path_of(self, command: Command) -> str | None:
-        return self._paths.get(id(command))
+        paths = self._paths.get(id(command))
+        return paths[0] if paths else None

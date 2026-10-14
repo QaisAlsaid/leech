@@ -26,9 +26,7 @@ def argument_type_from_option_type(
         case discord.ApplicationCommandOptionType.user:
             return Types.USER
         case discord.ApplicationCommandOptionType.channel:
-            if not permissive:
-                unsupported(optiontype)
-            return None
+            return Types.ATTACHMENT
         case discord.ApplicationCommandOptionType.role:
             if not permissive:
                 unsupported(optiontype)
@@ -40,9 +38,7 @@ def argument_type_from_option_type(
         case discord.ApplicationCommandOptionType.number:
             return Types.NUM
         case discord.ApplicationCommandOptionType.attachment:
-            if not permissive:
-                unsupported(optiontype)
-            return None
+            return Types.ATTACHMENT
 
 
 def argument_from_option(
@@ -53,9 +49,10 @@ def argument_from_option(
         return None
 
     typedef = TypesRegistry.require(type)
+    forced_optional = option.type == discord.ApplicationCommandOptionType.attachment
     return Argument(
         name=option.name,
         type=typedef,
         description=option.description,
-        required=option.required,
+        required=option.required and not forced_optional,
     )

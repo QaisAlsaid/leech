@@ -17,6 +17,7 @@ class Invocation:
         *,
         chain: Optional[Chain] = None,
         via: Optional[str] = None,
+        elevated: bool = False,
     ):
         self.message: discord.Message = message
         self.command: Command = command
@@ -24,6 +25,7 @@ class Invocation:
         self.defaults: dict[str, Any] = defaults or {}
         self.chain: Chain = chain or Chain()  # shared across the whole chain
         self.via: Optional[str] = via
+        self.elevated: bool = elevated
 
     async def invoke(self) -> "Invocation | None":
         return await self.command.binding.invoke(self)
