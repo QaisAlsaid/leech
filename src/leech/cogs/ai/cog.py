@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import discord
 from pydantic import ValidationError
-import json
-import logging
-import leech.core.helpers.text.splitter as splitter
+
 from leech.core.cog.cog import Cog
 from leech.core.cog.context import CogContext, Priority
 from leech.core.cog.error import CogError
+from leech.core.command.chain import Chain
 from leech.core.command.invocation import Invocation
 from leech.core.command.mock.binding import MockBinding
 from leech.core.command.native.binding import NativeBinding
@@ -18,13 +17,21 @@ from leech.core.permissions import is_owner
 from leech.core.ai import schema
 from leech.core.ai.audit import ActionLog
 from leech.core.ai.service import AiError, AiService
+from leech.core.helpers.interactions import harvest
 import leech.config as config
 from leech.core.error import BaseError
 from leech.core.parser.types.registry import Types, TypesRegistry
+import leech.core.helpers.text.splitter as splitter
+
+import json
+import logging
+
 _logger = logging.getLogger(__name__)
 
 REPLY_LIMIT = 1990
 ATTEMPTS = 3
+MAX_ROUNDS = 3
+MODEL_CALL_BUDGET = 4
 
 
 class AiCog(Cog):
@@ -41,8 +48,8 @@ class AiCog(Cog):
             window_limit=config.ai_window_limit,
             window_budget=config.ai_window_budget,
         )
-        self.log = ActionLog()
         self.context.add_on_unload(self.shutdown)
+        self.log = ActionLog()
 
     async def shutdown(self) -> None:
         await self.ai.aclose()
@@ -58,16 +65,16 @@ class AiCog(Cog):
             ),
             arguments=[],
             subcommands=(self.get_talk() | self.get_dry() | self.get_persona()
-                         | self.get_model()
-                         | self.get_clear() | self.get_off() | self.get_status()) | self.get_catalog(),
+                         | self.get_model() | self.get_catalog()
+                         | self.get_clear() | self.get_off() | self.get_status()),
             binding=MockBinding(),
             is_root=True,
         )
         if not self.context.add_command(ai.name, ai):
             raise CogError(f"i failed to load '{ai.name}' command.")
 
-    # ... get_talk / get_dry / get_persona / get_clear / get_off / get_status
-    #     exactly as delivered last round ...
+    # ... get_talk / get_dry / get_persona / get_model / get_catalog / get_clear /
+    #     get_off / get_status: UNCHANGED from your current file — keep yours ...
 
     def get_model(self) -> dict[str, Command]:
         def leaf(name: str, description: str, handler, arguments=None) -> Command:
@@ -123,68 +130,10 @@ class AiCog(Cog):
     def _chain_reply(self, prefix: str) -> str:
         lines = "\n".join(f"  {line}" for line in self.ai.usage())
         return f"{prefix}\n{lines}"
-
-    async def model_list_handler(self, invocation: Invocation):
-        await invocation.message.reply(self._chain_reply("model chain:"))
-
-    async def model_add_handler(self, invocation: Invocation):
-        self._require_owner(invocation)
-        provider, _, model = invocation.arguments["model"].partition(":")
-        position = invocation.arguments.get("position")
-        try:
-            slot = await self.ai.add_slot(provider.strip(), model.strip(), position)
-        except ValueError as e:
-            raise CogError(f"i couldn't add that model. details: {e}", is_user_error=True) from e
-        await invocation.message.reply(self._chain_reply(f"added `{slot.key}`. chain:"))
-
-    async def model_remove_handler(self, invocation: Invocation):
-        self._require_owner(invocation)
-        try:
-            await self.ai.remove_slot(invocation.arguments["model"].strip())
-        except ValueError as e:
-            raise CogError(f"i couldn't remove that model. details: {e}", is_user_error=True) from e
-        await invocation.message.reply(self._chain_reply("removed. chain:"))
-
-    async def model_main_handler(self, invocation: Invocation):
-        self._require_owner(invocation)
-        try:
-            await self.ai.promote_slot(invocation.arguments["model"].strip())
-        except ValueError as e:
-            raise CogError(f"i couldn't promote that model. details: {e}", is_user_error=True) from e
-        await invocation.message.reply(self._chain_reply("promoted. chain:"))
-
-    async def model_reset_handler(self, invocation: Invocation):
-        self._require_owner(invocation)
-        await self.ai.reset_chain()
-        await invocation.message.reply(self._chain_reply("chain reset to startup default:"))
-
-    async def model_budget_handler(self, invocation: Invocation):
-        self._require_owner(invocation)
-        try:
-            self.ai.set_window_budget(invocation.arguments["chars"])
-        except ValueError as e:
-            raise CogError(f"i couldn't set that budget. details: {e}", is_user_error=True) from e
-        chars = invocation.arguments["chars"]
-        await invocation.message.reply(
-            f"window budget set to {chars} chars (~{chars // 4} tokens).")
-
+ 
     # ... request() / on_message / is_addressed / _reply_snippet / _reply /
     #     say_handler / dry_handler / persona & clear & off handlers: exactly as
     #     delivered last round ...
-
-    async def status_handler(self, invocation: Invocation):
-        channel_id = invocation.message.channel.id
-        window = self.ai.window(channel_id)
-        await invocation.message.reply("\n".join([
-            "models:",
-            *(f"  {line}" for line in self.ai.usage()),
-            f"thinking: `{config.ai_thinking}` | read timeout: `{config.ai_read_timeout}s` | turn budget: `{config.ai_turn_deadline}s`",
-            f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
-            f"memory: {window.size()} messages, ~{window.chars()} chars (~{window.chars() // 4} tokens) of a {window.budget()} char budget",
-            f"catalog: {len(self.catalog())} commands",
-            f"active: {'yes' if channel_id in self.ai.active else 'no'}",
-        ]))
-
 
     def get_talk(self) -> dict[str, Command]:
         return {"talk": Command(
@@ -261,28 +210,12 @@ class AiCog(Cog):
                          "with its arguments and defaults.",
             arguments=[], subcommands={},
             binding=NativeBinding(handler=self.catalog_handler))}
-
-    async def catalog_handler(self, invocation: Invocation):
-        entries = self.catalog()
-        lines: list[str] = []
-        for entry in entries:
-            args = ", ".join(f"{a.name}: {a.type}" + ("" if a.required else " (optional)")
-                             for a in entry.arguments)
-            lines.append(f"`{entry.command}`"
-                         + (f" [{args}]" if args else "")
-                         + f" — {entry.description}")
-        payload = schema.catalog_prompt_block(entries)
-        lines.append("")
-        lines.append(f"> {len(entries)} commands, {len(payload)} chars "
-                     f"(~{len(payload) // 4} tokens).")
-        message = invocation.message
-        for chunk in splitter.split("\n".join(lines)):
-            message = await message.reply(chunk)
-
+   
+   # -- catalog (your policy, preserved; P4 makes it config-driven) --------------
     def _visible(self, path: str, command: Command) -> bool:
-        if command.ai_visible is not None: # to be added in v0.0.5 
+        if command.ai_visible is not None:
             return command.ai_visible
-        if path == "ai.talk":
+        if path == "ai.talk":           # reentrancy: no second model turn
             return False
         if isinstance(command.binding, SlashBinding):
             return False
@@ -295,9 +228,10 @@ class AiCog(Cog):
         channel = message.channel
         guild = getattr(channel, "guild", None)
         if guild is not None:
-            return f"#{channel.name} of guild '{guild.name}'" # pyright: ignore
+            return f"#{channel.name} of guild '{guild.name}'"
         return "a direct message"
 
+    # -- listener -------------------------------------------------------------------
     async def on_message(self, message: discord.Message):
         client = self.context.client
         if message.author.bot:
@@ -319,19 +253,20 @@ class AiCog(Cog):
             return False, None
 
         content = message.content
-        for form in (f"<@{client.user.id}>", f"<@!{client.user.id}>"): # pyright: ignore
+        for form in (f"<@{client.user.id}>", f"<@!{client.user.id}>"):
             content = content.replace(form, " ")
-        inner = await self.request(message, content.strip() or "hi")
-        return True, inner
+        await self.request(message, content.strip() or "hi")
+        return True, None   # commands now run inside request() via the front door
 
     def is_addressed(self, message: discord.Message) -> bool:
         client = self.context.client
-        if client.user.mentioned_in(message): # pyright: ignore
+        if client.user.mentioned_in(message):
             return True
         ref = message.reference
         if ref is not None:
             resolved = ref.cached_message or getattr(ref, "resolved", None)
-            if isinstance(resolved, discord.Message) and resolved.author.id == client.user.id: # pyright: ignore
+            if (isinstance(resolved, discord.Message) 
+                and resolved.author.id == client.user.id): # pyright: ignore
                 return True
         return False
 
@@ -345,98 +280,247 @@ class AiCog(Cog):
                 resolved = await message.channel.fetch_message(ref.message_id)
             except discord.HTTPException:
                 return None
-        if not isinstance(resolved, discord.Message) or not resolved.content.strip():
+        if not isinstance(resolved, discord.Message) or not resolved.content.strip(): # pyright: ignore
             return None
-        snippet = " ".join(resolved.content.split())[:120]
-        return f"{resolved.author.display_name}: {snippet}"
+        snippet = " ".join(resolved.content.split())[:120] # pyright: ignore
+        return f"{resolved.author.display_name}: {snippet}" # pyright: ignore
 
+    # -- the agent loop: emit -> run -> collect -> refeed -> reply --------------------
     async def request(self, message: discord.Message, content: str, *,
-                      dry: bool = False) -> Invocation | None:
-        system = schema.system_prompt(
-            self.ai.persona(message.channel.id), self.catalog(),
-            where=self._where(message))
-        feedback: str | None = None
+                      dry: bool = False) -> None:
+        channel_id = message.channel.id
+        system = schema.system_prompt(self.ai.persona(channel_id), self.catalog(),
+                                      where=self._where(message))
         snippet = await self._reply_snippet(message)
+        carried = content
+        calls = 0
+        summary: list[str] = []   # accumulated results across rounds (for wrap-up)
 
-        for _ in range(ATTEMPTS):
-            prompt = content if feedback is None else feedback
-            author = message.author.display_name if feedback is None else "(system)"
-            try:
-                async with message.channel.typing():
-                    raw = await self.ai.chat(
-                        message.channel.id, author, message.author.id, prompt,
-                        system=system, reply=snippet)
-            except AiError as e:
-                self.log.write(kind="error", principal=message.author.id, note=e.message)
-                await message.reply(f"i couldn't generate a proper response 😟 details: {e.message}")
-                return None
+        for round_index in range(MAX_ROUNDS):
+            # -- model turn (with schema-retry) --------------------------------
+            action: schema.AiAction | None = None
+            feedback: str | None = None
+            for _ in range(ATTEMPTS):
+                if calls >= MODEL_CALL_BUDGET:
+                    await self._reply(message, "i hit my thinking budget for this message 😟")
+                    return
+                calls += 1
+                prompt = carried if feedback is None else feedback
+                author = message.author.display_name if feedback is None else "(system)"
+                try:
+                    async with message.channel.typing():
+                        raw = await self.ai.chat(channel_id, author, message.author.id,
+                                                 prompt, system=system, reply=snippet)
+                except AiError as e:
+                    self.log.write(kind="error", principal=message.author.id, note=e.message)
+                    await message.reply(f"i couldn't generate a proper response 😟 details: {e.message}")
+                    return
+                try:
+                    action = schema.AiAction.model_validate_json(schema.strip_fences(raw))
+                    break
+                except ValidationError as e:
+                    _logger.warning("ai output rejected: %.500s — error: %s", raw, e)
+                    feedback = (f"(system) your output was invalid for the schema: {e}. "
+                                "respond with corrected JSON only.")
+            if action is None:
+                self.log.write(kind="error", principal=message.author.id,
+                               note="schema retries exhausted")
+                await self._reply(message, "i couldn't turn that into a command 😟")
+                return
 
-            try:
-                action = schema.AiAction.model_validate_json(schema.strip_fences(raw))
-            except ValidationError as e:
-                _logger.warning("ai output rejected: %.500s — error: %s", raw, e)
-                feedback = (f"(system) your output was invalid for the schema: {e}. "
-                            "respond with corrected JSON only.")
-                continue
-
+            # -- pure chat: done --------------------------------------------------
             if not action.commands:
                 if dry:
-                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n(dry run - nothing executed.)")
+                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n(dry run — nothing executed.)")
                     self.log.write(kind="dry", principal=message.author.id, note="chat")
                 else:
                     await self._reply(message, action.reply or "…")
-                return None
+                return
 
-            requested = action.commands[0]
-            command = self.context.client.commands.get_command(requested.command)
-            if command is None:
-                feedback = (f"(system) command '{requested.command}' does not exist. "
-                            "use exact paths from the catalog; respond with "
-                            "corrected JSON or a reply.")
-                continue
+            # -- execute commands, collect results ---------------------------------
+            results: list[str] = []
+            for index, requested in enumerate(action.commands):
+                confirmation = requested.reply or (action.reply if index == 0 else None)
+                if confirmation and not dry:
+                    await self._reply(message, confirmation)
 
-            if dry:
-                preview = (f"```json\n{action.model_dump_json(indent=2)}\n```\n"
-                           f"→ would run: `{requested.command}` "
-                           f"with: {', '.join(f'{k}={v!r}' for k, v in requested.arguments.items()) or 'no arguments'}\n"
-                           f"(dry run — nothing executed.)")
-                await self._reply(message, preview)
-                self.log.write(kind="dry", principal=message.author.id,
+                command = self.context.client.commands.get_command(requested.command)
+                if command is None:
+                    results.append(f"(error) '{requested.command}' does not exist")
+                    self.log.write(kind="denied", principal=message.author.id,
+                                   command=requested.command, note="unknown command")
+                    continue
+                if not self._visible(requested.command, command):
+                    results.append(f"(error) '{requested.command}' is not available to you")
+                    self.log.write(kind="denied", principal=message.author.id,
+                                   command=requested.command, note="not in ai catalog")
+                    continue
+                try:
+                    inner = Invocation.parse(
+                        message=message, command=command,
+                        tokens=schema.action_tokens(requested),
+                        chain=Chain(), via="ai")
+                except BaseError as e:
+                    results.append(f"(error) '{requested.command}' is invalid: {e.message}")
+                    self.log.write(kind="denied", principal=message.author.id,
+                                   command=requested.command, note=e.message)
+                    continue
+
+                if dry:
+                    args = ", ".join(f"{k}={v!r}" for k, v in requested.arguments.items()) or "no arguments"
+                    await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n→ would run: `{requested.command}` with: {args}\n(dry run — nothing executed.)")
+                    self.log.write(kind="dry", principal=message.author.id,
+                                   command=requested.command, arguments=requested.arguments)
+                    return
+
+                # marker AFTER the confirmation, BEFORE execution:
+                # the sweep must not capture our own narration
+                marker = discord.utils.time_snowflake(discord.utils.utcnow(), high=True)
+                chain = await self.context.client.dispatcher.run(message, inner)
+                outputs: list[str] = []
+                if chain is not None and chain.out:
+                    outputs = [str(entry) for entry in chain.out]      # structured first
+                else:
+                    outputs = await self.collect_outputs(message, marker)
+                results.extend(f"(result) {line}" for line in outputs if line)
+                self.log.write(kind="run", principal=message.author.id,
                                command=requested.command, arguments=requested.arguments)
-                return None
 
+            summary.extend(results)
+            carried = ("(system) command results:\n" + "\n".join(results)
+                       + "\nrespond with the answer to the user, or more commands "
+                         "if genuinely needed.")
+
+        # -- rounds exhausted: force a wrap-up reply ------------------------------
+        if calls < MODEL_CALL_BUDGET:
+            calls += 1
             try:
-                inner = Invocation.parse(  # the production parser validates everything
-                    message=message, command=command,
-                    tokens=schema.action_tokens(requested),
-                    via="ai")
-            except BaseError as e:
-                feedback = (f"(system) that invocation is invalid: {e.message}. "
-                            "respond with corrected JSON or just a reply.")
-                continue
+                async with message.channel.typing():
+                    raw = await self.ai.chat(
+                        channel_id, "(system)", message.author.id,
+                        "(system) you've used all your command rounds. reply to the "
+                        "user now — no more commands, summarize what happened.",
+                        system=system)
+                final = schema.AiAction.model_validate_json(schema.strip_fences(raw))
+                await self._reply(message, final.reply or "…")
+                return
+            except (AiError, ValidationError):
+                pass
+        await self._reply(message, "i ran out of rounds 😟\n" + "\n".join(summary[-12:]))
 
-            if requested.reply or action.reply:
-                await self._reply(message, (requested.reply or action.reply)) # pyright: ignore
-            self.log.write(kind="run", principal=message.author.id,
-                           command=requested.command, arguments=requested.arguments)
-            return inner
+    async def collect_outputs(self, message: discord.Message,
+                              marker_id: int) -> list[str]:
+        """post-run sweep of our own messages — captures every command's output,
+        because everything a command shows the user is sent by leech."""
+        me = self.context.client.user.id
+        texts: list[str] = []
+        after = discord.Object(id=marker_id)
+        try:
+            async for msg in message.channel.history(limit=15, after=after):
+                if msg.author.id == me:
+                    rendered = harvest(msg).render()
+                    if rendered:
+                        texts.append(rendered)
+        except discord.HTTPException:
+            pass
+        return texts
 
-        self.log.write(kind="denied", principal=message.author.id, note="no valid action after retries")
-        await message.reply("i couldn't turn that into a command 😟")
-        return None
+    async def _reply(self, message: discord.Message, text: str) -> discord.Message:
+        return await message.reply(text[:REPLY_LIMIT], mention_author=False,
+                                    allowed_mentions=discord.AllowedMentions.none())
 
-    async def _reply(self, message: discord.Message, text: str) -> None:
-        await message.reply(text[:REPLY_LIMIT], mention_author=False,
-                            allowed_mentions=discord.AllowedMentions.none())
-
+    # -- handlers ------------------------------------------------------------------
     async def say_handler(self, invocation: Invocation):
+        if invocation.via == "ai":
+            # the structural latch: via now survives derive hops, so this fires
+            # even when the AI reaches ai.talk through cmd.invoke indirection.
+            raise CogError("the assistant can't talk to itself 😁", is_user_error=True)
         self.ai.activate(invocation.message.channel.id)
-        return await self.request(invocation.message, invocation.arguments["message"])
+        await self.request(invocation.message, invocation.arguments["message"])
+        return None
 
     async def dry_handler(self, invocation: Invocation):
         self.ai.activate(invocation.message.channel.id)
         await self.request(invocation.message, invocation.arguments["message"], dry=True)
         return None
+
+    
+    async def catalog_handler(self, invocation: Invocation):
+        entries = self.catalog()
+        lines: list[str] = []
+        for entry in entries:
+            args = ", ".join(f"{a.name}: {a.type}" + ("" if a.required else " (optional)")
+                             for a in entry.arguments)
+            lines.append(f"`{entry.command}`"
+                         + (f" [{args}]" if args else "")
+                         + f" — {entry.description}")
+        payload = schema.catalog_prompt_block(entries)
+        lines.append("")
+        lines.append(f"> {len(entries)} commands, {len(payload)} chars "
+                     f"(~{len(payload) // 4} tokens).")
+        message = invocation.message
+        for chunk in splitter.split("\n".join(lines)):
+            message = await message.reply(chunk)
+
+
+    async def status_handler(self, invocation: Invocation):
+        channel_id = invocation.message.channel.id
+        window = self.ai.window(channel_id)
+        await invocation.message.reply("\n".join([
+            "models:",
+            *(f"  {line}" for line in self.ai.usage()),
+            f"thinking: `{config.ai_thinking}` | read timeout: `{config.ai_read_timeout}s` | turn budget: `{config.ai_turn_deadline}s`",
+            f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
+            f"memory: {window.size()} messages, ~{window.chars()} chars (~{window.chars() // 4} tokens) of a {window.budget()} char budget",
+            f"catalog: {len(self.catalog())} commands",
+            f"active: {'yes' if channel_id in self.ai.active else 'no'}",
+        ]))
+
+
+    async def model_list_handler(self, invocation: Invocation):
+        await invocation.message.reply(self._chain_reply("model chain:"))
+
+    async def model_add_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        provider, _, model = invocation.arguments["model"].partition(":")
+        position = invocation.arguments.get("position")
+        try:
+            slot = await self.ai.add_slot(provider.strip(), model.strip(), position)
+        except ValueError as e:
+            raise CogError(f"i couldn't add that model. details: {e}", is_user_error=True) from e
+        await invocation.message.reply(self._chain_reply(f"added `{slot.key}`. chain:"))
+
+    async def model_remove_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        try:
+            await self.ai.remove_slot(invocation.arguments["model"].strip())
+        except ValueError as e:
+            raise CogError(f"i couldn't remove that model. details: {e}", is_user_error=True) from e
+        await invocation.message.reply(self._chain_reply("removed. chain:"))
+
+    async def model_main_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        try:
+            await self.ai.promote_slot(invocation.arguments["model"].strip())
+        except ValueError as e:
+            raise CogError(f"i couldn't promote that model. details: {e}", is_user_error=True) from e
+        await invocation.message.reply(self._chain_reply("promoted. chain:"))
+
+    async def model_reset_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        await self.ai.reset_chain()
+        await invocation.message.reply(self._chain_reply("chain reset to startup default:"))
+
+    async def model_budget_handler(self, invocation: Invocation):
+        self._require_owner(invocation)
+        try:
+            self.ai.set_window_budget(invocation.arguments["chars"])
+        except ValueError as e:
+            raise CogError(f"i couldn't set that budget. details: {e}", is_user_error=True) from e
+        chars = invocation.arguments["chars"]
+        await invocation.message.reply(
+            f"window budget set to {chars} chars (~{chars // 4} tokens).")
+
 
     async def persona_set_handler(self, invocation: Invocation):
         channel_id = invocation.message.channel.id
@@ -467,6 +551,13 @@ class AiCog(Cog):
     async def off_handler(self, invocation: Invocation):
         self.ai.deactivate(invocation.message.channel.id)
         await invocation.message.reply("ok, but, its all history stoopid stoopid man 😢🇧🇷.")
+
+
+
+
+    # ... persona / model / clear / off / status / catalog handlers: UNCHANGED —
+    #     keep yours, including the model group and its owner gate ...
+
 
 def create_cog(context: CogContext):
     return AiCog(context=context)

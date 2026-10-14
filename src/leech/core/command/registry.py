@@ -1,8 +1,14 @@
 from .runtime import Command
-
 import logging
+import re
 
 _logger = logging.getLogger(__name__)
+
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+
+def is_valid_identifier(s: str) -> bool:
+    return bool(IDENTIFIER_RE.fullmatch(s))
 
 
 class CommandRegistry:
@@ -13,7 +19,7 @@ class CommandRegistry:
         )  # id(Command) -> path (reverse index, P4 reads it)
 
     def register_command(self, path: str, cmd: Command) -> bool:
-        if not path.isidentifier():
+        if not is_valid_identifier(path):
             _logger.error(f"rejected non-identifier command path: {path!r}")
             return False
 
@@ -25,7 +31,7 @@ class CommandRegistry:
                 return False
             staged.append((path, cmd))
             for name, child in cmd.subcommands.items():
-                if not name.isidentifier():
+                if not is_valid_identifier(name):
                     _logger.error(
                         f"rejected non-identifier subcommand: '{path}.{name}'."
                     )

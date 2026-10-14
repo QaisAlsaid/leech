@@ -401,6 +401,10 @@ class TodoCog(Cog):
             rawtext = "no tasks."
         msg = f"**{name}**\n{rawtext}"
         message = invocation.message
+        lines = [f"list '{name}' ({len(todolist.todo)} tasks):"] + [
+            f"{i}: {task.content}" for i, task in enumerate(todolist.todo)
+        ]
+        invocation.chain.out.append("\n".join(lines))
         for chunk in splitter.split(msg):
             message = await message.reply(chunk)
 

@@ -506,7 +506,7 @@ class CommandCog(Cog):
                 arguments=resolved.command.arguments, tokens=resolved.args
             )
         )
-        return Invocation(invocation.message, resolved.command, arguments)
+        return invocation.derive(resolved.command, arguments)
 
     async def invoke_prefix(
         self, invocation: Invocation, bot: int | None, raw_invocation: str

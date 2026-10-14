@@ -4,11 +4,10 @@ from leech.core.parser.token import Token, TokenType
 
 from .registry import CommandRegistry
 from .invocation import Invocation
+from .chain import Chain
 from . import resolver
 from leech.core.parser import parser
 from leech.core.error import BaseError
-
-# from leech.leech import Leech
 
 CHAIN_MAX = 64
 
@@ -23,11 +22,33 @@ class CommandDispatcher:
     ):
         title = "your fault 🚫🧠" if is_user_error else "my fault 🐛😁"
         await message.reply(
-            f"**{title}**\n\n" "\n >".join(error_message.split("\n")),
+            f"**{title}**\n\n{'\n> '.join(error_message.split('\n'))}",
             mention_author=True,
         )
 
-    async def dispatch4(self, message: discord.Message, tokens: list[Token]):
+    async def run(
+        self, message: discord.Message, invocation: Invocation | None
+    ) -> Chain | None:
+        if invocation is None:
+            return None
+        chain = invocation.chain
+        count = 0
+        try:
+            while invocation is not None:
+                if count >= CHAIN_MAX:
+                    raise BaseError(
+                        f"command chain is too long: {CHAIN_MAX}, "
+                        f"limit is: {CHAIN_MAX}.\n"
+                        "maybe try `>help concepts command-chain`."
+                    )
+                async with message.channel.typing():
+                    invocation = await invocation.invoke()
+                count += 1
+        except BaseError as err:
+            await self.error(message, err.message, err.is_user_error)
+        return chain
+
+    async def dispatch(self, message: discord.Message, tokens: list[Token]):
         invocation = None
         consumed = False
 
@@ -67,24 +88,9 @@ class CommandDispatcher:
                 if not consumed:
                     return False, None
 
-            chain = 0
-
-            while invocation is not None:
-                if chain >= CHAIN_MAX:
-                    raise BaseError(
-                        f"command chain is too long: {CHAIN_MAX}, "
-                        f"limit is: {CHAIN_MAX}.\n"
-                        "maybe try "
-                        "`>help concepts command-chain`."
-                    )
-
-                async with message.channel.typing():
-                    invocation = await invocation.invoke()
-
-                chain += 1
-
         except BaseError as err:
             await self.error(message, err.message, err.is_user_error)
-            return True, None
+            return consumed, None
 
+        await self.run(message, invocation)
         return consumed, None

@@ -32,7 +32,7 @@ class AiCommand(BaseModel):
 class AiAction(BaseModel):
     reply: str | None = None
     commands: list[AiCommand] = Field(
-        default_factory=list, max_length=1
+        default_factory=list, max_length=3
     )  # stub till v0.0.4
 
     @model_validator(mode="after")
@@ -119,7 +119,9 @@ def system_prompt(
         '- run a command: {"commands": [{"command": "todo.add", '
         '"arguments": {"task": "buy milk"}, "reply": "optional confirmation"}]}\n'
         "rules:\n"
-        "- 'commands' is a list of command objects; at most ONE command per response for now.\n"
+        "- 'commands' is a list of command objects; up to 3 per response. they run in order\n"
+        "- and you receive their results, after which you may reply or continue with more\n"
+        "- commands. keep going only while genuinely needed; otherwise reply and stop.\n"
         "- 'command' is an exact dotted path from the catalog.\n"
         "- 'arguments' is an object mapping exact argument names to string values.\n"
         "- argument values are strings.\n"

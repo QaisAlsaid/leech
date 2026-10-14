@@ -59,7 +59,7 @@ class Leech(discord.Client):
             if message.author.bot:
                 # bots never issue commands, but still reach cog listeners —
                 # the userphone tunnel depends on other bots' messages.
-                consumed, result = await self.dispatcher.dispatch4(message, [])
+                consumed, result = await self.dispatcher.dispatch(message, [])
             else:
                 lexed = lexer.lex(
                     content=message.content,
@@ -71,9 +71,7 @@ class Leech(discord.Client):
                     f"lexed: trigger: {lexed.trigger}, prefix: {lexed.prefix}, "
                     f"args: {lexed.tokens}"
                 )
-                consumed, result = await self.dispatcher.dispatch4(
-                    message, lexed.tokens
-                )
+                consumed, result = await self.dispatcher.dispatch(message, lexed.tokens)
             _logger.debug(f"command dispatched: consumed: {consumed}, result: {result}")
         except BaseError as e:
             await self.dispatcher.error(message, e.message, e.is_user_error)
