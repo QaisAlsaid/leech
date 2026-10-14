@@ -196,7 +196,7 @@ class HelpCog(Cog):
             is_root=True,
         )
         if not self.context.add_command(help.name, help):
-            raise Exception(f"failed to load '{help.name}' command.")
+            raise CogError(f"failed to load '{help.name}' command.")
         sos_desc = CommandDescriptor(
             name="sos",
             description=help.description,
@@ -207,7 +207,7 @@ class HelpCog(Cog):
         )
         sos = self.context.client.binder.bind(sos_desc)
         if not self.context.add_command(sos.name, sos):
-            raise Exception(f"failed to load '{sos.name}' self-command.")
+            raise CogError(f"failed to load '{sos.name}' self-command.")
 
     def get_subcommands(self) -> dict[str, Command]:
         return {**self.get_concepts()}

@@ -12,6 +12,7 @@ from leech.core.permissions import is_owner
 from leech.core.error import BaseError
 from leech.core.command.slash.binding import SlashBinding
 from leech.core.command.mock.binding import MockBinding
+from leech.core.cog.error import CogError
 
 
 class SudoCog(Cog):
@@ -30,7 +31,7 @@ class SudoCog(Cog):
             is_root=True,
         )
         if not self.context.add_command(sudo.name, sudo):
-            raise Exception(f"failed to load '{sudo.name}' command")
+            raise CogError(f"failed to load '{sudo.name}' command")
         doas_desc = CommandDescriptor(
             name="doas",
             description=sudo.description,
@@ -43,13 +44,87 @@ class SudoCog(Cog):
         )
         doas = self.context.client.binder.bind(doas_desc)
         if not self.context.add_command(doas.name, doas):
-            raise Exception(f"failed to load '{doas.name}' self-command.")
+            raise CogError(f"failed to load '{doas.name}' self-command.")
 
     def get_subcommands(self) -> dict[str, Command]:
-        return {**self.get_echo()}
+        return self.get_echo() | self.get_cog()
 
     def check_permissions(self, id: int):
         return is_owner(id)
+
+    def get_cog(self) -> dict[str, Command]:
+        def leaf(name: str, description: str, handler, arguments=None) -> Command:
+            return Command(
+                name=name,
+                description=description,
+                arguments=arguments or [],
+                subcommands={},
+                binding=NativeBinding(handler=handler),
+            )
+
+        path_arg = Argument(
+            name="path",
+            description="the cog module path, e.g. leech.cogs.ai.cog.",
+            usage_example="path=leech.cogs.ai.cog",
+            type=TypesRegistry.require(Types.STR),
+            required=True,
+        )
+
+        return {
+            "cog": Command(
+                name="cog",
+                description="load, unload and reload cogs.",
+                usage_example=">sudo cog reload path=leech.cogs.ai.cog",
+                arguments=[],
+                binding=MockBinding(),
+                subcommands={
+                    "list": leaf("list", "list loaded cogs.", self.cog_list_handler),
+                    "load": leaf(
+                        "load", "load a cog.", self.cog_load_handler, [path_arg]
+                    ),
+                    "unload": leaf(
+                        "unload", "unload a cog.", self.cog_unload_handler, [path_arg]
+                    ),
+                    "reload": leaf(
+                        "reload",
+                        "reload a cog (hot code swap).",
+                        self.cog_reload_handler,
+                        [path_arg],
+                    ),
+                },
+            )
+        }
+
+    def _cogs(self):
+        return self.context.client.cogs
+
+    def _refuse_self(self, path: str, action: str) -> None:
+        if path == self.context.owner:
+            raise CogError(f"i can't {action} myself 😁", is_user_error=True)
+
+    async def cog_list_handler(self, invocation: Invocation):
+        paths = sorted(self._cogs().loaded)
+        await invocation.message.reply(
+            "\n".join(f"`{p}`" for p in paths) or "no cogs loaded."
+        )
+
+    async def cog_load_handler(self, invocation: Invocation):
+        path = invocation.arguments["path"].strip()
+        await self._cogs().load(path)  # CogError → friendly error reply via dispatch4
+        await invocation.message.reply(f"loaded `{path}`.")
+
+    async def cog_unload_handler(self, invocation: Invocation):
+        path = invocation.arguments["path"].strip()
+        self._refuse_self(path, "unload")
+        if not await self._cogs().unload(path):
+            raise CogError(f"cog '{path}' is not loaded.", is_user_error=True)
+        await invocation.message.reply(f"unloaded `{path}`.")
+
+    async def cog_reload_handler(self, invocation: Invocation):
+        path = invocation.arguments["path"].strip()
+        self._refuse_self(path, "reload")
+        await self._cogs().reload(path)
+        await invocation.message.reply(f"reloaded `{path}`.")
 
     async def echo_handler(self, invocation: Invocation):
         if not self.check_permissions(invocation.message.author.id):

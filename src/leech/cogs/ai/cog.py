@@ -42,6 +42,10 @@ class AiCog(Cog):
             window_budget=config.ai_window_budget,
         )
         self.log = ActionLog()
+        self.context.add_on_unload(self.shutdown)
+
+    async def shutdown(self) -> None:
+        await self.ai.aclose()
 
     async def load(self):
         ai = Command(

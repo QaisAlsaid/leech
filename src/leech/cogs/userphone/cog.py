@@ -147,7 +147,7 @@ class UserphoneCog(Cog):
             },
         )
         if not self.context.add_command(userphone.name, userphone):
-            raise Exception(f"failed to load '{userphone.name}' command")
+            raise CogError(f"failed to load '{userphone.name}' command")
 
     def get_subcommands(self) -> dict[str, Command]:
         return {

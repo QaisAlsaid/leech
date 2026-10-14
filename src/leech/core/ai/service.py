@@ -349,6 +349,10 @@ class AiService:
         await self._rebuild([tuple(e) for e in self._default_chain])
         self._persist()
 
+    async def aclose(self) -> None:
+        for slot in self._slots:
+            await slot.provider.aclose()
+
     # -- window budget -----------------------------------------------------------
     def set_window_budget(self, chars: int) -> None:
         if chars < 1_000:

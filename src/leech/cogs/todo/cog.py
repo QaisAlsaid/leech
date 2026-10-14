@@ -54,7 +54,7 @@ class TodoCog(Cog):
             is_root=True,
         )
         if not self.context.add_command(todo.name, todo):
-            raise Exception(f"failed to load '{todo.name}' command.")
+            raise CogError(f"failed to load '{todo.name}' command.")
         self.command = todo
      
     def get_subcommands(self) -> dict[str, Command]:

@@ -58,3 +58,6 @@ for provider, env in AI_PROVIDERS.items():
 
 ai_window_limit: int = int(os.getenv("AI_WINDOW_LIMIT", "60"))
 ai_window_budget: int = int(os.getenv("AI_WINDOW_BUDGET", "8000"))
+prefixes: list[str] = [
+    p.strip() for p in os.getenv("PREFIXES", ">, $").split(",") if p.strip()
+]

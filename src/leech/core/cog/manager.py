@@ -1,12 +1,14 @@
+import asyncio
+import contextlib
 import importlib
-from enum import Enum, auto
-from typing import Callable
+import logging
+from typing import Callable, Coroutine
+
 from .cog import Cog
 from .context import CogContext, Priority
 from .error import CogError
-import logging
 
-_logger = logging.getLogger(__file__)
+_logger = logging.getLogger(__name__)
 
 
 class PrioritizedQueues:
@@ -42,24 +44,50 @@ class PrioritizedQueues:
 
         return False, None
 
-    def add_listener(self, priority: Priority, cb: Callable):
+    def add_listener(self, priority: Priority, cb: Callable) -> Callable[[], None]:
         match priority:
             case Priority.FIRST:
                 if self._first:
                     raise ValueError("first is already set.")
                 self._first = cb
+
+                def dispose():
+                    if self._first is cb:
+                        self._first = None
+
             case Priority.HIGH:
                 self._high.append(cb)
+
+                def dispose():
+                    with contextlib.suppress(ValueError):
+                        self._high.remove(cb)
+
             case Priority.MEDIUM:
                 self._medium.append(cb)
+
+                def dispose():
+                    with contextlib.suppress(ValueError):
+                        self._medium.remove(cb)
+
             case Priority.LOW:
                 self._low.append(cb)
+
+                def dispose():
+                    with contextlib.suppress(ValueError):
+                        self._low.remove(cb)
+
             case Priority.LAST:
                 if self._last:
                     raise ValueError("last is already set.")
                 self._last = cb
+
+                def dispose():
+                    if self._last is cb:
+                        self._last = None
+
             case _:
                 raise ValueError("invalid priority.")
+        return dispose
 
 
 class CogManager:
@@ -67,16 +95,49 @@ class CogManager:
         self.client = client
         self._on_message: PrioritizedQueues = PrioritizedQueues()
         self.loaded: dict[str, Cog] = {}
+        self._tasks: dict[str, set[asyncio.Task]] = {}
 
+    # -- task ownership ----------------------------------------------------------
+    def spawn(
+        self, owner: str, coro: Coroutine, *, name: str | None = None
+    ) -> asyncio.Task:
+        """task owned by the cog at `owner`; cancelled on its unload/reload."""
+        task = asyncio.get_running_loop().create_task(coro, name=name)
+        bucket = self._tasks.setdefault(owner, set())
+        bucket.add(task)
+        task.add_done_callback(bucket.discard)
+        return task
+
+    async def reap(self, owner: str) -> None:
+        tasks = self._tasks.pop(owner, set())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # -- listeners ------------------------------------------------------------------
+    def add_on_message(self, priority: Priority, cb: Callable) -> Callable[[], None]:
+        return self._on_message.add_listener(priority, cb)
+
+    # -- lifecycle ---------------------------------------------------------------------
     async def load(self, path: str):
         if path in self.loaded:
             raise CogError(f"cog: {path}, is already loaded")
+        cog: Cog | None = None
         try:
             module = importlib.import_module(path)
+            cog = module.create_cog(CogContext(client=self.client, owner=path))
+            await cog.context.load()
         except Exception as e:
-            raise CogError(f"failed to import module: '{path}', details: {e}")
-        cog: Cog = module.create_cog(CogContext(client=self.client))
-        await cog.context.load()
+            if cog is not None:
+                # roll back partially-registered commands/listeners from a failed load
+                try:
+                    await cog.context.unload()
+                except Exception:
+                    _logger.exception(f"rollback failed while loading cog: '{path}'")
+            if isinstance(e, CogError):
+                raise
+            raise CogError(f"failed to load cog: '{path}', details: {e}") from e
         self.loaded[path] = cog
         _logger.debug(f"loaded cog: '{path}'")
 
@@ -86,16 +147,21 @@ class CogManager:
             _logger.error(f"failed to unload cog: '{path}'")
             return False
 
-        await cog.context.unload()
+        await cog.context.unload()  # on_unload callbacks + command/listener cleanup
+        await self.reap(path)  # cog-owned tasks die here
         self.loaded.pop(path)
         _logger.debug(f"unloaded cog: '{path}'")
         return True
 
-    async def reload(self, path: str):
-        pass
-
-    def add_on_message(self, priority: Priority, cb: Callable):
-        self._on_message.add_listener(priority, cb)
+    async def reload(self, path: str) -> bool:
+        if path not in self.loaded:
+            _logger.error(f"failed to reload cog: '{path}'")
+            return False
+        module = importlib.import_module(path)  # cached module object
+        await self.unload(path)
+        importlib.reload(module)  # fresh code, same sys.modules entry
+        await self.load(path)  # raises CogError if the new code is broken
+        return True
 
     async def on_message(self, message):
         return await self._on_message.on_message(message)
