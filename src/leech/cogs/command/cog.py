@@ -911,24 +911,24 @@ class CommandCog(Cog):
 
         if len(segments) == 1:
             name = segments[0]
-
-            if registry.get_command(name) is not None:
+            old = registry.get_command(name)
+            if old is not None:
+                if name not in self.invoke_aliases:
+                    raise CogError(
+                        f"'{name}' is already registered by a non-template "
+                        "command. pick another name 😁.",
+                        is_user_error=True,
+                    )
+                command.subcommands = old.subcommands   # keep nested templates alive
                 registry.unregister_command(name)
-
             if not self.context.add_command(name, command):
-                raise CogError(
-                    f"'{name}' is already registered by a non-template "
-                    "command. pick another name 😁.",
-                    is_user_error=True,
-                )
+                raise CogError(f"failed to register '{name}'.", is_user_error=True)
             return
 
         root_name = segments[0]
         root = registry.get_command(root_name)
-
         if root is None:
             root = self._stub(root_name, is_root=True)
-
         elif (
             root_name not in self.invoke_aliases
             and root_name not in self._template_groups
@@ -942,28 +942,18 @@ class CommandCog(Cog):
         container = root
         for segment in segments[1:-1]:
             child = container.subcommands.get(segment)
-
             if child is None:
                 child = self._stub(segment)
                 container.subcommands[segment] = child
-
             container = child
 
         leaf = segments[-1]
-
-        if leaf in container.subcommands:
-            raise CogError(
-                f"'{template.name}' is already in use.",
-                is_user_error=True,
-            )
-
+        old = container.subcommands.get(leaf)
+        if old is not None:
+            # our own leaf (edit / overwrite / stub from a deeper template):
+            # replace in place, keep deeper templates nested under it alive.
+            command.subcommands = old.subcommands
         container.subcommands[leaf] = command
-
-        _logger.debug(
-            "REGISTER TREE %s: %r",
-            root_name,
-            root.subcommands,
-        )
 
         registry.unregister_command(root_name)
         if not self.context.add_command(root_name, root):
@@ -972,6 +962,74 @@ class CommandCog(Cog):
                 is_user_error=True,
             )
 
+    # def _register_template(self, template: InvokeAlias) -> None:
+    #     segments = template.name.split(".")
+    #     command = self._build_template_command(template)
+    #     registry = self.context.client.commands
+    #
+    #     if len(segments) == 1:
+    #         name = segments[0]
+    #
+    #         if registry.get_command(name) is not None:
+    #             registry.unregister_command(name)
+    #
+    #         if not self.context.add_command(name, command):
+    #             raise CogError(
+    #                 f"'{name}' is already registered by a non-template "
+    #                 "command. pick another name 😁.",
+    #                 is_user_error=True,
+    #             )
+    #         return
+    #
+    #     root_name = segments[0]
+    #     root = registry.get_command(root_name)
+    #
+    #     if root is None:
+    #         root = self._stub(root_name, is_root=True)
+    #
+    #     elif (
+    #         root_name not in self.invoke_aliases
+    #         and root_name not in self._template_groups
+    #     ):
+    #         raise CogError(
+    #             f"'{root_name}' is a built-in command. i can't nest under it. "
+    #             "pick another root.",
+    #             is_user_error=True,
+    #         )
+    #
+    #     container = root
+    #     for segment in segments[1:-1]:
+    #         child = container.subcommands.get(segment)
+    #
+    #         if child is None:
+    #             child = self._stub(segment)
+    #             container.subcommands[segment] = child
+    #
+    #         container = child
+    #
+    #     leaf = segments[-1]
+    #
+    #     if leaf in container.subcommands:
+    #         raise CogError(
+    #             f"'{template.name}' is already in use.",
+    #             is_user_error=True,
+    #         )
+    #
+    #     container.subcommands[leaf] = command
+    #
+    #     _logger.debug(
+    #         "REGISTER TREE %s: %r",
+    #         root_name,
+    #         root.subcommands,
+    #     )
+    #
+    #     registry.unregister_command(root_name)
+    #     if not self.context.add_command(root_name, root):
+    #         raise CogError(
+    #             f"failed to refresh group '{root_name}'.",
+    #             is_user_error=True,
+    #         )
+    #
     def _stub(self, name: str, *, is_root: bool = False) -> Command:
         return Command(
             name=name,
@@ -1432,8 +1490,6 @@ class CommandCog(Cog):
     async def _present(
         self, invocation: Invocation, execution, *, site, echo: str | None = None
     ) -> None:
-        if invocation.via == "ai":
-            return
         try:
             spec = EchoSpec.parse(echo)
         except ValueError as e:
@@ -1451,6 +1507,8 @@ class CommandCog(Cog):
             or harvested.is_ephemeral
         )
         if not should:
+            if invocation.via == "ai":
+                return
             buttons = [
                 c for c in harvested.components if c.kind == "button" and not c.disabled
             ]

@@ -134,7 +134,8 @@ async def execute_prefix(
     )
     marker = discord.utils.time_snowflake(discord.utils.utcnow(), high=True)
     waiter = ResponseWaiter(client)
-
+    if len(text) > 2000:
+        text = text[:2000]
     await channel.send(text, files=files or None, reference=reference)
     state = {"result": _UNSET}
 
