@@ -176,13 +176,13 @@ class UserphoneCog(Cog):
         )
         return {end.name: end}
 
-
     async def format_message_from_source(
-    self,
-    message: discord.Message,
-    display_mode: DisplayMode,
-) -> str:
+        self,
+        message: discord.Message,
+        display_mode: DisplayMode,
+    ) -> str:
         import re
+
         content = message.content.strip()
         content = re.sub(
             r"nigger",
@@ -208,8 +208,7 @@ class UserphoneCog(Cog):
                 formatted += (
                     f"\n> was replying to {referenced.author.display_name}:\n"
                     + "\n".join(
-                        f"> {line}"
-                        for line in referenced.content.strip().splitlines()
+                        f"> {line}" for line in referenced.content.strip().splitlines()
                     )
                 )
 
@@ -218,8 +217,9 @@ class UserphoneCog(Cog):
 
         return formatted
 
-
-    async def on_message_from_source(self, message: discord.Message, sesh: UserphoneSession):
+    async def on_message_from_source(
+        self, message: discord.Message, sesh: UserphoneSession
+    ):
         if sesh.call_state != CallState.ACTIVE or message.author.bot:
             return False, None
         content = message.content.strip()
@@ -227,30 +227,36 @@ class UserphoneCog(Cog):
             return False, None
         remote = await self.ensure_channel(sesh.remote_channel_id)
         await self.validate_remote_channel(remote)
-        await remote.send( # pyright: ignore reason: validated
-                await self.format_message_from_source(message, sesh.display_mode))
+        await remote.send(  # pyright: ignore reason: validated
+            await self.format_message_from_source(message, sesh.display_mode)
+        )
         return True, None
 
-    async def on_message_from_remote(self, message: discord.Message, sesh: UserphoneSession):
-        if sesh.call_state != CallState.ACTIVE or message.author.id != sesh.target_bot_id:
+    async def on_message_from_remote(
+        self, message: discord.Message, sesh: UserphoneSession
+    ):
+        if (
+            sesh.call_state != CallState.ACTIVE
+            or message.author.id != sesh.target_bot_id
+        ):
             return False, None
         content = message.content.strip()
         source = await self.ensure_channel(sesh.source_channel_id)
         self.validate_source_channel(source)
         import re
-        
+
         pattern = r"<a?:userphone(?:_\w+)?:\d+>|:userphone(?:_\w+)?:"
         content = re.sub(pattern, "📞", content).strip()
 
         if content:
-            await source.send(content) # pyright: ignore reason validated
+            await source.send(content)  # pyright: ignore reason validated
         return True, None
 
     async def on_message(self, message: discord.Message):
         sesh = self.sessions.get(message.channel.id)
         if sesh is not None:
             return await self.on_message_from_source(message, sesh)
-        
+
         remote = self.remote_channels.get(message.channel.id)
         if remote is not None:
             sesh = self.sessions.get(remote)
@@ -306,33 +312,42 @@ class UserphoneCog(Cog):
         remote = await self.ensure_channel(sesh.remote_channel_id)
         await self.validate_remote_channel(remote)
         execution = await execute_slash(
-            self.context.client, sesh.call_command, remote, {},
+            self.context.client,
+            sesh.call_command,
+            remote,
+            {},
             application_id=sesh.target_bot_id,
-            command_name=" ".join(sesh.call_command.target))
+            command_name=" ".join(sesh.call_command.target),
+        )
         harvested = await execution.settle()
         await invocation.message.reply(
             (harvested.render() if harvested else None)
-            or "i received a response, but couldn't read it 😟")
+            or "i received a response, but couldn't read it 😟"
+        )
         return None
 
     async def hangup(self, message: discord.Message, sesh: UserphoneSession):
         remote = await self.ensure_channel(sesh.remote_channel_id)
         await self.validate_remote_channel(remote)
         execution = await execute_slash(
-            self.context.client, sesh.hangup_command, remote, {},
+            self.context.client,
+            sesh.hangup_command,
+            remote,
+            {},
             application_id=sesh.target_bot_id,
-            command_name=" ".join(sesh.hangup_command.target))
+            command_name=" ".join(sesh.hangup_command.target),
+        )
         harvested = await execution.settle()
         await message.reply(
             (harvested.render() if harvested else None)
-            or "i received a response, but couldn't read it 😟")      
+            or "i received a response, but couldn't read it 😟"
+        )
 
     async def hangup_handler(self, invocation: Invocation):
         sesh = self.ensure_session(invocation.message.channel.id)
         sesh.call_state = CallState.IDLE
 
         await self.hangup(invocation.message, sesh)
-         
 
     async def display_handler(self, invocation: Invocation):
         invocation.arguments["mode"]
@@ -348,12 +363,17 @@ class UserphoneCog(Cog):
 
         self.sessions.pop(invocation.message.channel.id, None)
         remote = self.remote_channels.pop(sesh.remote_channel_id, None)
-        await invocation.message.reply(f"closed session between the current channel and remote: <#{sesh.remote_channel_id}>{f' but i encountered an error during hangup, details: {err}' if err is not None else ''}.")
+        await invocation.message.reply(
+            f"closed session between the current channel and remote: <#{sesh.remote_channel_id}>{f' but i encountered an error during hangup, details: {err}' if err is not None else ''}."
+        )
 
     def ensure_session(self, current: int) -> UserphoneSession:
         sesh = self.sessions.get(current)
         if sesh is None:
-            raise CogError("no active session. maybe try starting a session via `>userphone` 😁.", is_user_error=True)
+            raise CogError(
+                "no active session. maybe try starting a session via `>userphone` 😁.",
+                is_user_error=True,
+            )
         return sesh
 
     async def fetch_channel(self, channle: int):
@@ -385,7 +405,6 @@ class UserphoneCog(Cog):
                     f"i don't have sufficient permissions in source channel. i require: (send messages and read messages permissions)."
                 )
 
-    
     async def validate_remote_channel(self, channel):
         if not isinstance(channel, discord.abc.GuildChannel):
             raise CogError(
@@ -398,7 +417,6 @@ class UserphoneCog(Cog):
                 f"remote channel is not a messageable channel.",
                 is_user_error=True,
             )
-
 
         botid = self.context.client.user.id  # pyright: ignore
         bot_member = channel.guild.get_member(botid)
@@ -423,7 +441,6 @@ class UserphoneCog(Cog):
         if channel is None:
             channel = await self.fetch_channel(channel_id)
         return channel
-
 
     async def validate_new_session(
         self,

@@ -75,4 +75,6 @@ class CommandBinder:
             defaults=descriptor.defaults,
             usage_example=descriptor.usage_example,
             help_content=descriptor.help_content,
+            ai_visible=target.ai_visible,
+            elevated=target.elevated,
         )

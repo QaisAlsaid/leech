@@ -13,6 +13,7 @@ class TodoTask(BaseModel):
     content: str
     author_id: int | None = None
 
+
 class Perms(BaseModel):
     read: bool = True
     write: bool = False
@@ -28,6 +29,7 @@ class TodoListHandle(BaseModel):
     author_id: int
     name: str
 
+
 class EditorHandle(BaseModel):
     handle: TodoListHandle
     perms: Perms
@@ -36,6 +38,7 @@ class EditorHandle(BaseModel):
 class TodoAuthor(BaseModel):
     author_id: int
     editor_in: list[EditorHandle] = Field(default_factory=list)
+
 
 class TodoContainer(BaseModel):
     author: TodoAuthor
@@ -88,12 +91,15 @@ class TodoService:
         try:
             with self.temppath.open("w", encoding="utf-8") as file:
                 json.dump(
-                container_adapter.dump_python(self.containers, mode="json"),
-                file,)
+                    container_adapter.dump_python(self.containers, mode="json"),
+                    file,
+                )
 
             os.replace(self.temppath, self.path)
         except Exception as e:
-            raise TodoError(f"failed to persist data. your edit will not be saved. details: {e}") from e
+            raise TodoError(
+                f"failed to persist data. your edit will not be saved. details: {e}"
+            ) from e
 
     def ensure_container(self, user: int) -> TodoContainer:
         container = self.containers.get(user)
@@ -209,17 +215,18 @@ class TodoService:
         self.persist_json()
         return old.content
 
-    def list_tasks(self, user: int, author: int, list_ident: str = "") -> tuple[str, TodoList]:
+    def list_tasks(
+        self, user: int, author: int, list_ident: str = ""
+    ) -> tuple[str, TodoList]:
         user_container = self.ensure_container(user)
-        if list_ident == '':
+        if list_ident == "":
             lst = self.ensure_active_list(Perms(read=True), user_container)
-            name = user_container.active.name # pyright: ignore reason: handled 
-        else: 
+            name = user_container.active.name  # pyright: ignore reason: handled
+        else:
             name, lst = self.ensure_list(user, author, list_ident, Perms(read=True))
         if lst is None:
             raise TodoError(f"a list: '{list_ident}' does not exist.")
         return name, lst
-
 
     def create_list(
         self, user: int, set_active: bool, list_name: str = ""
@@ -258,20 +265,26 @@ class TodoService:
             name = list(user_container.todo.keys())[dig]
 
         discarded = user_container.todo.pop(name)
-        if (user_container.active is not None and user_container.active.author_id == user and user_container.active.name == name):
+        if (
+            user_container.active is not None
+            and user_container.active.author_id == user
+            and user_container.active.name == name
+        ):
             user_container.active = None
         self.persist_json()
         return discarded
 
-    def set_editor(self, user: int, editor: int, perms: Perms, list_ident: str = ''):
+    def set_editor(self, user: int, editor: int, perms: Perms, list_ident: str = ""):
         if user == editor:
             raise TodoError("you are already the author of this list 😁.")
         user_container = self.ensure_container(user)
-        if list_ident == '':
+        if list_ident == "":
             if user_container.active is None:
                 raise TodoError("you don't have an active list.")
             if user_container.active.author_id != user:
-                raise TodoError("you don't have authority to set editors for the active list.")
+                raise TodoError(
+                    "you don't have authority to set editors for the active list."
+                )
             list_ident = user_container.active.name
 
         name, lst = self.ensure_list(user, user, list_ident, perms)
@@ -283,26 +296,31 @@ class TodoService:
                 handle.perms = perms
                 isset = True
         if not isset:
-            editor_in.append(EditorHandle(handle=TodoListHandle(author_id=user, name=name), perms=perms))
+            editor_in.append(
+                EditorHandle(
+                    handle=TodoListHandle(author_id=user, name=name), perms=perms
+                )
+            )
         self.persist_json()
 
-
-    def remove_editor(self, user: int, editor: int, list_ident: str = ''):
+    def remove_editor(self, user: int, editor: int, list_ident: str = ""):
         if user == editor:
             raise TodoError("you are the author of this list 😁.")
 
         user_container = self.ensure_container(user)
-        if list_ident == '':
+        if list_ident == "":
             if user_container.active is None:
                 raise TodoError("you don't have an active list.")
             if user_container.active.author_id != user:
-                raise TodoError("you don't have authority to set editors for the active list.")
+                raise TodoError(
+                    "you don't have authority to set editors for the active list."
+                )
             list_ident = user_container.active.name
         name, lst = self.ensure_list(user, user, list_ident, Perms(read=False))
         e = lst.editors.pop(editor, None)
         has_err = False
         if e is None:
-            has_err=True
+            has_err = True
         editor_in = self.ensure_container(editor).author.editor_in
         for i, handle in enumerate(editor_in):
             if handle.handle.author_id == user and handle.handle.name == name:

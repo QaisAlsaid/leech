@@ -21,7 +21,7 @@ ALLOWED_HOSTS = {
 }
 
 
-class ImageCog(Cog):
+class PngCog(Cog):
     def __init__(self, context: CogContext):
         super().__init__(context=context)
         self.context.add_on_load(self.load)
@@ -196,4 +196,4 @@ class ImageCog(Cog):
 
 
 def create_cog(context: CogContext):
-    return ImageCog(context=context)
+    return PngCog(context=context)

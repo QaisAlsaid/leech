@@ -29,7 +29,7 @@ def _is_placeholder(message: discord.Message) -> bool:
 
 
 async def _edit_event(client, message_id: int, timeout: float) -> bool:
-    """wake-up shortcut only — event delivery is never assumed."""
+    """wake-up shortcut only - event delivery is never assumed."""
     try:
         await asyncio.wait_for(
             client.wait_for(

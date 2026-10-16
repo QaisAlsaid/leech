@@ -96,7 +96,7 @@ def format_command_details(command: Command, path: str) -> str:
         lines.extend(["**arguments**"])
     for position, arg in enumerate(command.arguments, start=1):
         required = "required" if arg.required else "optional"
-        lines.append(f"- `{arg.name}` — `{arg.type.type.name}` ({required})")
+        lines.append(f"- `{arg.name}` - `{arg.type.type.name}` ({required})")
 
         if arg.description:
             lines.append(f"  {arg.description}")
@@ -171,6 +171,7 @@ def format_argument_details(command: Command, argument: Argument, path: str) -> 
 
     return "\n".join(lines)
 
+
 @dataclass
 class Concept:
     blurb: str
@@ -203,7 +204,7 @@ CONCEPTS: dict[str, Concept] = {
             "arguments which swallow everything up to the next `known-name=`\n"
             "```\n"
             ">todo add task=buy milk\n"
-            ">cmd invoke slash @fergun invocation=\"img google query=bird nice\"\n"
+            '>cmd invoke slash @fergun invocation="img google query=bird nice"\n'
             "```\n"
             "**positional**: bare tokens fill arguments in declaration order:\n"
             "```\n"
@@ -220,7 +221,7 @@ CONCEPTS: dict[str, Concept] = {
             "other unset argument is optional and no `name=` follows. otherwise it "
             "takes a single token.\n"
             "5. quoting collapses multi-word values into one token: "
-            "`>img \"hot femboy\"`.\n\n"
+            '`>img "hot femboy"`.\n\n'
             "rule of thumb: put greedy arguments last, name everything else, or quote."
         ),
     ),
@@ -272,7 +273,7 @@ CONCEPTS: dict[str, Concept] = {
             "scopes: `command:todo.*` (a subtree), `command:*`, `message:*` "
             "(talking to the assistant), `*`. the most specific rule wins. deny "
             "beats allow on a tie.\n\n"
-            "**sudo** is not a permission — it's elevation, for commands that "
+            "**sudo** is not a permission - it's elevation, for commands that "
             "damage the bot itself (cog load/unload/reload, removing models). "
             "owner-only and human-only, structurally: the assistant can never "
             "elevate, no matter what.\n\n"
@@ -306,7 +307,7 @@ CONCEPTS: dict[str, Concept] = {
         body=(
             "a template is a persisted shortcut for an invocation:\n"
             "```\n"
-            ">cmd invoke template command=img type=leech invocation=\"fergun img google\"\n"
+            '>cmd invoke template command=img type=leech invocation="fergun img google"\n'
             ">img hot femboy\n"
             "```\n"
             "it has three types: `leech` (an alias to one of my commands), `slash` "
@@ -341,9 +342,9 @@ CONCEPTS: dict[str, Concept] = {
         blurb="the assistant: what it can run, what it sees, how to control it.",
         body=(
             "mention me (or reply to me) and ai answers. it can run commands on your "
-            "behalf: \"add buy milk to my todo\". and it can see each "
+            'behalf: "add buy milk to my todo". and it can see each '
             "command's results, so multi-step asks work in one message: \"make a "
-            "list called our_songs and add bord bard bird\".\n\n"
+            'list called our_songs and add bord bard bird".\n\n'
             "its catalog of commands is filtered by what you can do and what you've "
             "allowed it see (`>ai perms`)."
         ),

@@ -17,8 +17,10 @@ TASK_PREVIEW = 25
 def task_preview(task: str) -> str:
     return f"{task if len(task) < TASK_PREVIEW else f'{task[:TASK_PREVIEW - 3]}...'}"
 
+
 def format_perms(perms: Perms):
     return f"{'r' if perms.read else ''}{'w' if perms.write else ''}{'d' if perms.remove else ''}"
+
 
 def parse_perms(value: str | None) -> Perms:
     if value is None:
@@ -35,6 +37,7 @@ def parse_perms(value: str | None) -> Perms:
         write="w" in value,
         remove="d" in value,
     )
+
 
 class TodoCog(Cog):
     def __init__(self, context: CogContext):
@@ -56,7 +59,7 @@ class TodoCog(Cog):
         if not self.context.add_command(todo.name, todo):
             raise CogError(f"failed to load '{todo.name}' command.")
         self.command = todo
-     
+
     def get_subcommands(self) -> dict[str, Command]:
         return {
             **self.get_add(),
@@ -86,7 +89,7 @@ class TodoCog(Cog):
                     usage_example="task=finish writing forkic novel.",
                     type=TypesRegistry.require(Types.STR),
                     required=True,
-      )
+                )
             ],
             subcommands={},
             binding=NativeBinding(self.add_handler),
@@ -164,7 +167,7 @@ class TodoCog(Cog):
                     help_content="defaults to the current active list if left blank.",
                     type=TypesRegistry.require(Types.STR),
                     required=False,
-                )
+                ),
             ],
             subcommands={},
             binding=NativeBinding(self.list_handler),
@@ -220,7 +223,7 @@ class TodoCog(Cog):
                     help_content="defaults to the current active list if left blank.",
                     type=TypesRegistry.require(Types.STR),
                     required=False,
-                )
+                ),
             ],
             subcommands={},
             binding=NativeBinding(self.set_editor_handler),
@@ -247,7 +250,7 @@ class TodoCog(Cog):
                     help_content="defaults to the current active list if left blank.",
                     type=TypesRegistry.require(Types.STR),
                     required=False,
-                )
+                ),
             ],
             subcommands={},
             binding=NativeBinding(self.remove_editor_handler),
@@ -259,13 +262,11 @@ class TodoCog(Cog):
             name="contributions",
             description="show all lists that you are an editor in with your permsissions for each one.",
             usage_example=">todo contributions",
-            arguments=[
-            ],
+            arguments=[],
             subcommands={},
             binding=NativeBinding(self.contributions_handler),
         )
         return {contributions.name: contributions}
-
 
     def get_create(self) -> dict[str, Command]:
         create = Command(
@@ -366,8 +367,6 @@ class TodoCog(Cog):
         )
         return {activate.name: activate}
 
-
-
     async def add_handler(self, invocation: Invocation):
         task = invocation.arguments["task"]
         index = self.todo.add_task(invocation.message.author.id, task)
@@ -376,9 +375,7 @@ class TodoCog(Cog):
     async def remove_handler(self, invocation: Invocation):
         index = invocation.arguments["index"]
         task = self.todo.remove_task(invocation.message.author.id, index)
-        await invocation.message.reply(
-            f"removed task at: {index}."
-        )
+        await invocation.message.reply(f"removed task at: {index}.")
 
     async def update_handler(self, invocation: Invocation):
         index = invocation.arguments["index"]
@@ -411,9 +408,12 @@ class TodoCog(Cog):
     async def list_editors_handler(self, invocation: Invocation):
         lst = invocation.arguments.get("list")
         lst = lst if lst is not None else ""
-        name, todolist = self.todo.list_tasks(invocation.message.author.id, invocation.message.author.id, lst)
+        name, todolist = self.todo.list_tasks(
+            invocation.message.author.id, invocation.message.author.id, lst
+        )
         rawtext = "\n".join(
-        f"<@{uid}>: perms: '{format_perms(perms)}'" for uid, perms in todolist.editors.items()
+            f"<@{uid}>: perms: '{format_perms(perms)}'"
+            for uid, perms in todolist.editors.items()
         )
         if not todolist.editors:
             rawtext = "no editors."
@@ -428,14 +428,23 @@ class TodoCog(Cog):
         perms = parse_perms(perms)
         lst = invocation.arguments.get("list")
         lst = lst if lst is not None else ""
-        self.todo.set_editor(user=invocation.message.author.id, editor=editor, perms=perms, list_ident=lst)
-        await invocation.message.reply(f"user: <@{editor}> is now an editor with perms: {format_perms(perms)}")
+        self.todo.set_editor(
+            user=invocation.message.author.id,
+            editor=editor,
+            perms=perms,
+            list_ident=lst,
+        )
+        await invocation.message.reply(
+            f"user: <@{editor}> is now an editor with perms: {format_perms(perms)}"
+        )
 
     async def remove_editor_handler(self, invocation: Invocation):
         editor = invocation.arguments["user"]
         lst = invocation.arguments.get("list")
         lst = lst if lst is not None else ""
-        self.todo.remove_editor(user=invocation.message.author.id, editor=editor, list_ident=lst)
+        self.todo.remove_editor(
+            user=invocation.message.author.id, editor=editor, list_ident=lst
+        )
         await invocation.message.reply(f"user: <@{editor}> is no longer an editor.")
 
     async def create_handler(self, invocation: Invocation):
@@ -478,7 +487,10 @@ class TodoCog(Cog):
     async def contributions_handler(self, invocation: Invocation):
         contributions = self.todo.list_contributions(invocation.message.author.id)
         total = 0
-        rawtext = "\n".join(f"'{handle.handle.name}' <@{handle.handle.author_id}> with perms: '{format_perms(handle.perms)}'" for handle in contributions)
+        rawtext = "\n".join(
+            f"'{handle.handle.name}' <@{handle.handle.author_id}> with perms: '{format_perms(handle.perms)}'"
+            for handle in contributions
+        )
 
         rawtext += f"\n> total: {len(contributions)} contributions"
         if not contributions:
@@ -486,7 +498,6 @@ class TodoCog(Cog):
         message = invocation.message
         for chunk in splitter.split(rawtext):
             message = await message.reply(chunk)
-
 
     async def activate_handler(self, invocation: Invocation):
         name = invocation.arguments["identifier"]
@@ -498,6 +509,7 @@ class TodoCog(Cog):
     async def deactivate_handler(self, invocation: Invocation):
         self.todo.deactivate_list(invocation.message.author.id)
         await invocation.message.reply(f"deactivated the list.")
+
 
 def create_cog(context: CogContext):
     return TodoCog(context=context)

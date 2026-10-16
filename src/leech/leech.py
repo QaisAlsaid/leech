@@ -25,7 +25,7 @@ COGS = [
     "leech.cogs.todo.cog",
     "leech.cogs.help.cog",
     "leech.cogs.userphone.cog",
-    "leech.cogs.image-compress.cog",
+    "leech.cogs.png.cog",
     "leech.cogs.ai.cog",  # always last
 ]
 

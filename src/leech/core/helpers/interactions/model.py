@@ -7,21 +7,25 @@ from typing import Optional
 import discord
 from discord import components as dcomponents
 from discord import http
-import logging 
+import logging
 import json
 
 _logger = logging.getLogger(__name__)
 
 V2_FLAG = 1 << 15
-V2_TEXT = 10               # text display
-V2_MEDIA = {11, 12, 13}    # thumbnail, media gallery, file
+V2_TEXT = 10  # text display
+V2_MEDIA = {11, 12, 13}  # thumbnail, media gallery, file
 
 ECHO_WHEN = {"auto", "always", "never"}
 ECHO_KINDS = {"text", "image", "video", "audio", "file", "buttons"}
 ECHO_ALIASES = {
     "all": "always",
-    "images": "image", "videos": "video", "audios": "audio",
-    "files": "file", "interaction": "buttons", "button": "buttons",
+    "images": "image",
+    "videos": "video",
+    "audios": "audio",
+    "files": "file",
+    "interaction": "buttons",
+    "button": "buttons",
 }
 
 
@@ -30,17 +34,30 @@ def media_kind(url: str, content_type: Optional[str]) -> str:
     if ct.startswith(("image/", "video/", "audio/")):
         return ct.rsplit("/", 1)[0]
     ext = url.split("?")[0].rsplit(".", 1)[-1].lower()
-    return {"png": "image", "jpg": "image", "jpeg": "image", "gif": "image",
-            "webp": "image", "bmp": "image", "avif": "image",
-            "mp4": "video", "webm": "video", "mov": "video", "mkv": "video",
-            "mp3": "audio", "ogg": "audio", "wav": "audio", "m4a": "audio",
-            "flac": "audio"}.get(ext, "file")
+    return {
+        "png": "image",
+        "jpg": "image",
+        "jpeg": "image",
+        "gif": "image",
+        "webp": "image",
+        "bmp": "image",
+        "avif": "image",
+        "mp4": "video",
+        "webm": "video",
+        "mov": "video",
+        "mkv": "video",
+        "mp3": "audio",
+        "ogg": "audio",
+        "wav": "audio",
+        "m4a": "audio",
+        "flac": "audio",
+    }.get(ext, "file")
 
 
 @dataclass(frozen=True)
 class EchoSpec:
     when: str = "auto"
-    kinds: Optional[frozenset] = None       # None = everything
+    kinds: Optional[frozenset] = None  # None = everything
 
     def wants(self, kind: str) -> bool:
         return self.kinds is None or kind in self.kinds
@@ -63,7 +80,8 @@ class EchoSpec:
             else:
                 raise ValueError(
                     f"unknown echo selector: '{word}' "
-                    f"(kinds: {', '.join(sorted(ECHO_KINDS))} + media. when: auto/always/never)")
+                    f"(kinds: {', '.join(sorted(ECHO_KINDS))} + media. when: auto/always/never)"
+                )
         return cls(when=when, kinds=frozenset(kinds) or None)
 
 
@@ -75,8 +93,11 @@ def extract_v2(components) -> tuple[str, list[str]]:
     def collect_urls(node) -> None:
         if isinstance(node, dict):
             url = node.get("url")
-            if (isinstance(url, str) and url.startswith(("http://", "https://"))
-                    and url not in seen):
+            if (
+                isinstance(url, str)
+                and url.startswith(("http://", "https://"))
+                and url not in seen
+            ):
                 seen.add(url)
                 media.append(url)
             for value in node.values():
@@ -104,12 +125,15 @@ def extract_v2(components) -> tuple[str, list[str]]:
     walk(components)
     return "\n".join(t for t in texts if t.strip()), media
 
+
 async def _raw_message(message: discord.Message, client) -> Optional[dict]:
     try:
-        route = http.Route("GET", "/channels/{channel_id}/messages",
-                           channel_id=message.channel.id)
+        route = http.Route(
+            "GET", "/channels/{channel_id}/messages", channel_id=message.channel.id
+        )
         data = await client.http.request(
-            route, params={"limit": "3", "around": str(message.id)})
+            route, params={"limit": "3", "around": str(message.id)}
+        )
     except discord.HTTPException as e:
         _logger.warning("v2 raw fetch failed: %s", e)
         return None
@@ -135,18 +159,29 @@ async def harvest_full(message: discord.Message, client) -> HarvestedMessage:
         url = att.get("url")
         if url and url not in known:
             known.add(url)
-            harvested.attachments.append(HarvestedAttachment(
-                filename=att.get("filename") or "attachment", url=url,
-                content_type=att.get("content_type"), size=att.get("size") or 0))
+            harvested.attachments.append(
+                HarvestedAttachment(
+                    filename=att.get("filename") or "attachment",
+                    url=url,
+                    content_type=att.get("content_type"),
+                    size=att.get("size") or 0,
+                )
+            )
     _logger.warning("v2 raw: %.2500s", json.dumps(raw, default=str))
-    _logger.warning("v2 extract: text=%r media=%d attachments=%d",
-                    text[:120], len(media), len(raw.get("attachments") or []))
+    _logger.warning(
+        "v2 extract: text=%r media=%d attachments=%d",
+        text[:120],
+        len(media),
+        len(raw.get("attachments") or []),
+    )
     return harvested
+
 
 def media_name(url: str, index: int) -> str:
     stem = url.split("/")[-1].split("?")[0].rsplit(".", 1)[0]
     stem = stem.replace("-", "").replace("_", "")
     return stem if stem.isalnum() else f"image {index}"
+
 
 @dataclass
 class HarvestedField:
@@ -240,10 +275,17 @@ class HarvestedMessage:
         if self.components:
             parts.append(
                 f"(buttons on message {self.message_id}: "
-                + " ".join(c.render() for c in self.components) + ")")
+                + " ".join(c.render() for c in self.components)
+                + ")"
+            )
         return "\n".join(p for p in parts if p)[:limit]
 
-    def render_compact(self, limit: int = 1500, include_titles: bool = True, include_components: bool = True) -> str:
+    def render_compact(
+        self,
+        limit: int = 1500,
+        include_titles: bool = True,
+        include_components: bool = True,
+    ) -> str:
         lines: list[str] = []
         if self.content:
             lines.append(self.content)
@@ -276,9 +318,9 @@ class HarvestedMessage:
         return out
 
     def attachments_of(self, kinds) -> list[HarvestedAttachment]:
-        return [a for a in self.attachments
-                if media_kind(a.url, a.content_type) in kinds]
-
+        return [
+            a for a in self.attachments if media_kind(a.url, a.content_type) in kinds
+        ]
 
     def media_pairs(self) -> list[str]:
         out: list[str] = []

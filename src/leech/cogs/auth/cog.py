@@ -38,6 +38,8 @@ class AuthCog(Cog):
             subcommands=self.get_subcommands(),
             binding=MockBinding(),
             is_root=True,
+            ai_visible=False,
+            elevated=True
         )
         if not self.context.add_command(auth.name, auth):
             raise CogError(f"i failed to load '{auth.name}' command.")
@@ -118,6 +120,8 @@ class AuthCog(Cog):
                 arguments=[user_arg, scope_arg],
                 subcommands={},
                 binding=NativeBinding(handler=self.allow_handler),
+                ai_visible=False,
+                elevated=True
             ),
             "deny": Command(
                 name="deny",
@@ -125,6 +129,8 @@ class AuthCog(Cog):
                 arguments=[user_arg, scope_arg],
                 subcommands={},
                 binding=NativeBinding(handler=self.deny_handler),
+                ai_visible=False,
+                elevated=True
             ),
             "clear": Command(
                 name="clear",
@@ -132,6 +138,8 @@ class AuthCog(Cog):
                 arguments=[user_arg, scope_arg],
                 subcommands={},
                 binding=NativeBinding(handler=self.clear_handler),
+                ai_visible=False,
+                elevated=True
             ),
         }
 

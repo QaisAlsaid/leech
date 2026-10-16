@@ -47,7 +47,7 @@ leech_nice: (runs it and echoes the result)
 ```
 
 Any point after that the template acts like a real command: it shows up in the help, takes runtime arguments on top of its defaults, and persists across restarts.
-The stored invocation could be partial, whatever you leave out gets filled at runtime, and whatever your provided stays as default and can only be overwritten by `name=value`.
+The stored invocation could be partial, whatever you leave out gets filled at runtime, and whatever you've provided stays as default and can only be overwritten by `name=value`.
 
 - `>cmd invoke template edit` can re-pin it to another channel or change the echo policy
 - `>cmd invoke template remove` removes the template

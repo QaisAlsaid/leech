@@ -41,7 +41,9 @@ DEFAULT_PERSONA = (
     "you may run the bot's commands on request."
 )
 
-GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_API = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 GROQ_API = "https://api.groq.com/openai/v1"
 
 THINKING_EFFORT = {"low": "low", "high": "high"}
@@ -64,19 +66,34 @@ class Attachment:
     data: bytes
     viewable: bool
 
+
 class ContextWindow:
     def __init__(self, limit: int = 60, budget: int = 8_000, turn_cap: int = 800):
         self._turns: deque[Turn] = deque(maxlen=limit)
-        self._budget = budget    # total rendered chars; the TPM-sensitive knob
+        self._budget = budget  # total rendered chars; the TPM-sensitive knob
         self._turn_cap = turn_cap
 
-    def push(self, author: str, author_id: int, content: str, *,
-             is_bot: bool = False, reply: Optional[str] = None) -> None:
+    def push(
+        self,
+        author: str,
+        author_id: int,
+        content: str,
+        *,
+        is_bot: bool = False,
+        reply: Optional[str] = None,
+    ) -> None:
         content = content.strip()[: self._turn_cap]
         if not content:
             return
-        self._turns.append(Turn(author=author, author_id=author_id, content=content,
-                                is_bot=is_bot, was_replying_to=reply))
+        self._turns.append(
+            Turn(
+                author=author,
+                author_id=author_id,
+                content=content,
+                is_bot=is_bot,
+                was_replying_to=reply,
+            )
+        )
         self._trim()
 
     def render(self) -> list[tuple[bool, str]]:
@@ -109,8 +126,10 @@ class ContextWindow:
         self._trim()
 
     def _size(self) -> int:
-        return sum(len(t.content) + len(t.author) + len(t.was_replying_to or "")
-                   for t in self._turns)
+        return sum(
+            len(t.content) + len(t.author) + len(t.was_replying_to or "")
+            for t in self._turns
+        )
 
     def _trim(self) -> None:
         while len(self._turns) > 1 and self._size() > self._budget:
@@ -136,8 +155,13 @@ class Provider(ABC):
         await self._http.aclose()
 
     @abstractmethod
-    def _request(self, model: str, system: str, turns: list[tuple[bool, str]],
-                 generation: Generation) -> tuple[str, dict, dict]:
+    def _request(
+        self,
+        model: str,
+        system: str,
+        turns: list[tuple[bool, str]],
+        generation: Generation,
+    ) -> tuple[str, dict, dict]:
         pass
 
     @abstractmethod
@@ -151,34 +175,51 @@ class Provider(ABC):
         except Exception:
             return str(response.status_code)
 
-    async def complete(self, model: str, *, system: str,
-                       turns: list[tuple[bool, str]], generation: Generation,
-                       attachments: Sequence[Attachment] = ()) -> str:
-        url, headers, body = self._request(model, system, turns, generation, attachments)
+    async def complete(
+        self,
+        model: str,
+        *,
+        system: str,
+        turns: list[tuple[bool, str]],
+        generation: Generation,
+        attachments: Sequence[Attachment] = (),
+    ) -> str:
+        url, headers, body = self._request(
+            model, system, turns, generation, attachments
+        )
         response = await self._post(url, headers, body)
         if response.status_code >= 400:
-            raise ProviderError(response.status_code,
-                                f"{self.name} answered {self._detail(response)}")
+            raise ProviderError(
+                response.status_code, f"{self.name} answered {self._detail(response)}"
+            )
         try:
             return self._extract(response.json())
         except (KeyError, IndexError, TypeError):
-            raise ProviderError(0, f"{self.name} returned an unusable payload") from None
+            raise ProviderError(
+                0, f"{self.name} returned an unusable payload"
+            ) from None
 
     async def _post(self, url: str, headers: dict, body: dict) -> httpx.Response:
         for attempt in range(2):
             try:
                 response = await self._http.post(url, headers=headers, json=body)
             except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                raise ProviderError(0, f"{self.name} unreachable: {type(e).__name__}") from e
+                raise ProviderError(
+                    0, f"{self.name} unreachable: {type(e).__name__}"
+                ) from e
             if 400 <= response.status_code < 500:
-                raise ProviderError(response.status_code,
-                                    f"{self.name} answered {self._detail(response)}")
+                raise ProviderError(
+                    response.status_code,
+                    f"{self.name} answered {self._detail(response)}",
+                )
             if response.status_code >= 500:
                 if attempt == 0:
                     await asyncio.sleep(0.75)
                     continue
-                raise ProviderError(response.status_code,
-                                    f"{self.name} answered {self._detail(response)}")
+                raise ProviderError(
+                    response.status_code,
+                    f"{self.name} answered {self._detail(response)}",
+                )
             return response
         raise ProviderError(0, "unreachable")
 
@@ -194,12 +235,14 @@ class GeminiProvider(Provider):
             parts: list[dict] = [{"text": text}]
             if attachments and index == last and not is_bot:
                 for att in attachments:
-                    parts.append({
-                        "inline_data": {
-                            "mime_type": att.content_type or "image/png",
-                            "data": base64.b64encode(att.data).decode("ascii"),
+                    parts.append(
+                        {
+                            "inline_data": {
+                                "mime_type": att.content_type or "image/png",
+                                "data": base64.b64encode(att.data).decode("ascii"),
+                            }
                         }
-                    })
+                    )
             contents.append({"role": "model" if is_bot else "user", "parts": parts})
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
@@ -237,9 +280,15 @@ class OpenAICompatProvider(Provider):
                 for att in attachments:
                     b64 = base64.b64encode(att.data).decode("ascii")
                     mime = att.content_type or "image/png"
-                    content.append({"type": "image_url",
-                                    "image_url": {"url": f"data:{mime};base64,{b64}"}})
-            messages.append({"role": "assistant" if is_bot else "user", "content": content})
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        }
+                    )
+            messages.append(
+                {"role": "assistant" if is_bot else "user", "content": content}
+            )
         body: dict = {
             "model": model,
             "messages": messages,
@@ -276,11 +325,19 @@ class Slot:
 
 
 class AiService:
-    def __init__(self, chain: list[tuple[str, str]], keys: dict[str, str], *,
-                 thinking: str = "low", read_timeout: float = 20.0,
-                 turn_deadline: float = 75.0, cooldown: float = 90.0,
-                 window_limit: int = 60, window_budget: int = 8_000,
-                 store: Path = Path("persistent/v1/ai/ai.json")):
+    def __init__(
+        self,
+        chain: list[tuple[str, str]],
+        keys: dict[str, str],
+        *,
+        thinking: str = "low",
+        read_timeout: float = 20.0,
+        turn_deadline: float = 75.0,
+        cooldown: float = 90.0,
+        window_limit: int = 60,
+        window_budget: int = 8_000,
+        store: Path = Path("persistent/v1/ai/ai.json"),
+    ):
         self._keys = keys
         self._default_chain = [tuple(e) for e in chain]
         self._read_timeout = read_timeout
@@ -303,17 +360,21 @@ class AiService:
 
     def _validate_entry(self, provider_name: str, model: str) -> None:
         if not model:
-            raise ValueError("missing model. use provider:model, e.g. groq:openai/gpt-oss-120b.")
+            raise ValueError(
+                "missing model. use provider:model, e.g. groq:openai/gpt-oss-120b."
+            )
         if provider_name not in PROVIDERS:
             raise ValueError(
-                f"unknown provider '{provider_name}' (known: {', '.join(PROVIDERS)}).")
+                f"unknown provider '{provider_name}' (known: {', '.join(PROVIDERS)})."
+            )
         if provider_name not in self._keys:
             raise ValueError(f"no api key configured for provider '{provider_name}'.")
 
     def _create_slot(self, provider_name: str, model: str) -> Slot:
         self._validate_entry(provider_name, model)
-        provider = PROVIDERS[provider_name](self._keys[provider_name],
-                                            read_timeout=self._read_timeout)
+        provider = PROVIDERS[provider_name](
+            self._keys[provider_name], read_timeout=self._read_timeout
+        )
         return Slot(provider=provider, model=model)
 
     async def _rebuild(self, chain: list[tuple[str, str]]) -> None:
@@ -329,8 +390,9 @@ class AiService:
             await leftover.provider.aclose()
         self._slots = new_slots
 
-    async def add_slot(self, provider_name: str, model: str,
-                       position: Optional[int] = None) -> Slot:
+    async def add_slot(
+        self, provider_name: str, model: str, position: Optional[int] = None
+    ) -> Slot:
         self._validate_entry(provider_name, model)
         key = f"{provider_name}:{model}"
         if any(s.key == key for s in self._slots):
@@ -403,8 +465,9 @@ class AiService:
 
     def window(self, channel_id: int) -> ContextWindow:
         return self.windows.setdefault(
-            channel_id, ContextWindow(limit=self._window_limit,
-                                      budget=self._window_budget))
+            channel_id,
+            ContextWindow(limit=self._window_limit, budget=self._window_budget),
+        )
 
     def usage(self) -> list[str]:
         now = time.monotonic()
@@ -416,9 +479,17 @@ class AiService:
             lines.append(f"`{slot.key}`{mark}: {state}")
         return lines
 
-    async def chat(self, channel_id: int, author: str, author_id: int, content: str, *,
-                   system: str, reply: Optional[str] = None,
-                   attachments: Sequence[Attachment] = ()) -> str:
+    async def chat(
+        self,
+        channel_id: int,
+        author: str,
+        author_id: int,
+        content: str,
+        *,
+        system: str,
+        reply: Optional[str] = None,
+        attachments: Sequence[Attachment] = (),
+    ) -> str:
         lock = self._locks.setdefault(channel_id, asyncio.Lock())
         async with lock:
             viewable = [a for a in attachments if a.viewable]
@@ -426,11 +497,16 @@ class AiService:
             ready_vision: list[Slot] = []
             if viewable:
                 now = time.monotonic()
-                ready_vision = [s for s in self._slots if s.provider.vision
-                                and now >= self._cooldowns.get(s.key, 0.0)]
+                ready_vision = [
+                    s
+                    for s in self._slots
+                    if s.provider.vision and now >= self._cooldowns.get(s.key, 0.0)
+                ]
                 if not ready_vision:
-                    notes += [f"(image '{a.filename}'. no vision model ready. not shown)"
-                              for a in viewable]
+                    notes += [
+                        f"(image '{a.filename}'. no vision model ready. not shown)"
+                        for a in viewable
+                    ]
                     viewable = []
             if notes:
                 content = f"{content}\n" + "\n".join(notes)
@@ -440,18 +516,31 @@ class AiService:
 
             if viewable and ready_vision:
                 try:
-                    return await self._attempt(ready_vision, window.render(),
-                                               viewable, system, window)
+                    return await self._attempt(
+                        ready_vision, window.render(), viewable, system, window
+                    )
                 except AiError as e:
-                    _logger.warning("vision slots failed (%s). degrading to text only", e.message)
-                    window.push("(system)", 0,
-                                "(the attached image could not be processed. answering "
-                                "without seeing it)")
-            return await self._attempt(list(self._slots), window.render(), [], system, window)
+                    _logger.warning(
+                        "vision slots failed (%s). degrading to text only", e.message
+                    )
+                    window.push(
+                        "(system)",
+                        0,
+                        "(the attached image could not be processed. answering "
+                        "without seeing it)",
+                    )
+            return await self._attempt(
+                list(self._slots), window.render(), [], system, window
+            )
 
-    async def _attempt(self, slots: list[Slot], turns: list[tuple[bool, str]],
-                       attachments: Sequence[Attachment], system: str,
-                       window: ContextWindow) -> str:
+    async def _attempt(
+        self,
+        slots: list[Slot],
+        turns: list[tuple[bool, str]],
+        attachments: Sequence[Attachment],
+        system: str,
+        window: ContextWindow,
+    ) -> str:
         failures: list[str] = []
         for slot in slots:
             if time.monotonic() < self._cooldowns.get(slot.key, 0.0):
@@ -459,10 +548,15 @@ class AiService:
                 continue
             try:
                 text = await asyncio.wait_for(
-                    slot.provider.complete(slot.model, system=system, turns=turns,
-                                           generation=self._generation,
-                                           attachments=attachments),
-                    timeout=self._deadline)
+                    slot.provider.complete(
+                        slot.model,
+                        system=system,
+                        turns=turns,
+                        generation=self._generation,
+                        attachments=attachments,
+                    ),
+                    timeout=self._deadline,
+                )
             except ProviderError as e:
                 if e.rate_limited:
                     self._cooldowns[slot.key] = time.monotonic() + self._cooldown
@@ -472,7 +566,9 @@ class AiService:
             except asyncio.TimeoutError:
                 self._cooldowns[slot.key] = time.monotonic() + self._cooldown
                 _logger.warning("ai slot timed out: %s", slot.key)
-                failures.append(f"{slot.key}: exceeded {self._deadline:.0f}s turn deadline")
+                failures.append(
+                    f"{slot.key}: exceeded {self._deadline:.0f}s turn deadline"
+                )
                 continue
             window.push("leech", 0, text, is_bot=True)
             return text
@@ -480,10 +576,13 @@ class AiService:
 
     @staticmethod
     def _note(a: Attachment) -> str:
-        size = (f"{a.size / 1024:.0f} kb" if a.size < 1024 * 1024
-                else f"{a.size / (1024 * 1024):.1f} mb")
+        size = (
+            f"{a.size / 1024:.0f} kb"
+            if a.size < 1024 * 1024
+            else f"{a.size / (1024 * 1024):.1f} mb"
+        )
         return f"(attachment: '{a.filename}', {a.content_type or 'unknown type'}, {size}. not viewable by me)"
-   
+
     def _load(self) -> None:
         self._store.parent.mkdir(parents=True, exist_ok=True)
         if not self._store.exists():
@@ -502,8 +601,12 @@ class AiService:
                 continue
             provider_name, model = entry
             key = f"{provider_name}:{model}"
-            if (provider_name in PROVIDERS and provider_name in self._keys
-                    and model and key not in seen):
+            if (
+                provider_name in PROVIDERS
+                and provider_name in self._keys
+                and model
+                and key not in seen
+            ):
                 cleaned.append((provider_name, model))
                 seen.add(key)
         if not cleaned:
@@ -513,11 +616,14 @@ class AiService:
     def _persist(self) -> None:
         tmp = self._store.with_suffix(".json.temp")
         tmp.write_text(
-            json.dumps({
-                "personas": {str(k): v for k, v in self.personas.items()},
-                "active": sorted(self.active),
-                "chain": [[s.provider.name, s.model] for s in self._slots],
-                "window_budget": self._window_budget,
-            }),
-            encoding="utf-8")
+            json.dumps(
+                {
+                    "personas": {str(k): v for k, v in self.personas.items()},
+                    "active": sorted(self.active),
+                    "chain": [[s.provider.name, s.model] for s in self._slots],
+                    "window_budget": self._window_budget,
+                }
+            ),
+            encoding="utf-8",
+        )
         os.replace(tmp, self._store)
