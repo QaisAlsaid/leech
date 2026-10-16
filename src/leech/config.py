@@ -16,20 +16,14 @@ try:
 except ValueError as e:
     raise ValueError(f"failed to parse configuration. details: {e}") from e
 
-# --- ai model chain: ordered "provider:model" pairs; first is the main, rest fallbacks ---
 AI_PROVIDERS = {"gemini": "AI_API_KEY", "groq": "GROQ_API_KEY"}
 
 _chain_str = os.getenv(
     "AI_CHAIN", "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite"
 )
 ai_thinking: str = os.getenv("AI_THINKING", "low").lower()  # low | high | off
-ai_read_timeout: float = float(
-    os.getenv("AI_TIMEOUT", "20")
-)  # per-request read timeout
-ai_turn_deadline: float = float(
-    os.getenv("AI_TURN_DEADLINE", "75")
-)  # whole-turn budget
-
+ai_read_timeout: float = float(os.getenv("AI_TIMEOUT", "20"))
+ai_turn_deadline: float = float(os.getenv("AI_TURN_DEADLINE", "75"))
 ai_chain: list[tuple[str, str]] = []
 for entry in _chain_str.split(","):
     entry = entry.strip()
@@ -45,9 +39,6 @@ for entry in _chain_str.split(","):
         raise ValueError(f"missing model for provider '{provider}' in AI_CHAIN.")
     ai_chain.append((provider, model))
 
-if not ai_chain:
-    raise ValueError("AI_CHAIN resolved to an empty model chain.")
-
 ai_keys: dict[str, str] = {}
 for provider, env in AI_PROVIDERS.items():
     key = os.getenv(env)
@@ -61,3 +52,7 @@ ai_window_budget: int = int(os.getenv("AI_WINDOW_BUDGET", "8000"))
 prefixes: list[str] = [
     p.strip() for p in os.getenv("PREFIXES", ">, $").split(",") if p.strip()
 ]
+
+from importlib.metadata import version
+
+version_str: str = version("leech")

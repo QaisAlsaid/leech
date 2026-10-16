@@ -36,8 +36,23 @@ async def resolve(
     )
 
     if command is None:
+        suggestion = next(
+            (
+                c
+                for c in commands
+                if isinstance(c, discord.SlashCommand) and c.name == tokens[0].raw
+            ),
+            None,
+        )
+        hint = ""
+        if suggestion is not None and suggestion.application_id != bot:
+            hint = (
+                f". but '/{suggestion.name}' exists here under application "
+                f"{suggestion.application_id}. maybe try `bot={suggestion.application_id}`? 😁"
+            )
         raise SlashError(
-            f"slash command: '{tokens[0].raw}' not found in bot id: '{bot}' in this channel: '{channel}'."
+            f"slash command: '{tokens[0].raw}' not found in bot id: '{bot}' "
+            f"in this channel: '{channel}'{hint}"
         )
 
     target = [command.name]

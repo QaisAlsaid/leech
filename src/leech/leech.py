@@ -9,7 +9,7 @@ from leech.core.cog.manager import CogManager
 from leech.core.error import BaseError
 from leech.core.parser.types.registry import (
     TypesRegistry,
-)  # noqa: F401 (side-effect chain)
+)
 import leech.core.parser.lexer as lexer
 import leech.core.log
 from . import config
@@ -18,15 +18,15 @@ from leech.core.security import Security
 _logger = logging.getLogger(__name__)
 
 COGS = [
-    "leech.cogs.auth.cog",
+    "leech.cogs.auth.cog",  # always first
     "leech.cogs.ping.cog",
     "leech.cogs.sudo.cog",
     "leech.cogs.command.cog",
     "leech.cogs.todo.cog",
     "leech.cogs.help.cog",
     "leech.cogs.userphone.cog",
-    "leech.cogs.ai.cog",  # last: its catalog wants the full registry.
-    # when the auth cog lands (P4) it must be FIRST here — it owns the FIRST slot.
+    "leech.cogs.image-compress.cog",
+    "leech.cogs.ai.cog",  # always last
 ]
 
 
@@ -57,11 +57,12 @@ class Leech(discord.Client):
         if message.author.id == self.user.id:
             return
 
-        _logger.debug(f"received message: {message.content}")
+        _logger.debug(
+            f"received message: {message.content!r} author={message.author} "
+            f"embeds={len(message.embeds)} attachments={len(message.attachments)}"
+        )
         try:
             if message.author.bot:
-                # bots never issue commands, but still reach cog listeners —
-                # the userphone tunnel depends on other bots' messages.
                 consumed, result = await self.dispatcher.dispatch(message, [])
             else:
                 lexed = lexer.lex(
@@ -79,6 +80,4 @@ class Leech(discord.Client):
         except BaseError as e:
             await self.dispatcher.error(message, e.message, e.is_user_error)
         except Exception:
-            # the generalized silent-failure lesson: unknown errors must leave
-            # a full traceback in leech.log, never vanish into the default handler
             _logger.exception(f"unhandled error processing message: {message.id}")

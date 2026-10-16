@@ -36,8 +36,6 @@ class CogContext:
             for cb in self._on_unload:
                 await cb()
         finally:
-            # cleanup must run even if an unload callback blew up —
-            # otherwise commands/listeners leak on every failed unload
             await self._cleanup()
 
     def add_on_message(self, priority: Priority, cb: Callable) -> Callable[[], None]:
@@ -46,7 +44,6 @@ class CogContext:
         return dispose
 
     def spawn(self, coro: Coroutine, *, name: str | None = None) -> asyncio.Task:
-        """tracked task — cancelled when this cog unloads/reloads."""
         return self.client.cogs.spawn(self.owner, coro, name=name)
 
     def add_on_load(self, cb: Callable):

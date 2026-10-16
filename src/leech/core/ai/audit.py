@@ -23,7 +23,7 @@ class ActionLog:
     ) -> None:
         entry = {
             "ts": round(time.time(), 3),
-            "kind": kind,  # run|denied|error|dry
+            "kind": kind,  # run, denied, error, dry
             "principal": principal,
             "via": "ai",
             "command": command,

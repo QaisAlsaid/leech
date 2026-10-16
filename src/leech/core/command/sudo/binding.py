@@ -11,12 +11,6 @@ from leech.core.command import resolver
 
 
 class SudoBinding(Binding):
-    """the elevation modifier: takes a raw command line, re-resolves it, and
-    derives the invocation with elevation attached.
-    invariants: refuses via='ai' (elevation is a human gesture); owner-gated
-    upstream by the default-deny policy on command:sudo; derive never forwards
-    elevated — only this binding grants it."""
-
     def __init__(self, registry: CommandRegistry):
         self._registry = registry
 

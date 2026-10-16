@@ -23,7 +23,7 @@ class Invocation:
         self.command: Command = command
         self.arguments: dict[str, Any] = arguments
         self.defaults: dict[str, Any] = defaults or {}
-        self.chain: Chain = chain or Chain()  # shared across the whole chain
+        self.chain: Chain = chain or Chain()
         self.via: Optional[str] = via
         self.elevated: bool = elevated
 

@@ -97,11 +97,9 @@ class CogManager:
         self.loaded: dict[str, Cog] = {}
         self._tasks: dict[str, set[asyncio.Task]] = {}
 
-    # -- task ownership ----------------------------------------------------------
     def spawn(
         self, owner: str, coro: Coroutine, *, name: str | None = None
     ) -> asyncio.Task:
-        """task owned by the cog at `owner`; cancelled on its unload/reload."""
         task = asyncio.get_running_loop().create_task(coro, name=name)
         bucket = self._tasks.setdefault(owner, set())
         bucket.add(task)
@@ -115,11 +113,9 @@ class CogManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    # -- listeners ------------------------------------------------------------------
     def add_on_message(self, priority: Priority, cb: Callable) -> Callable[[], None]:
         return self._on_message.add_listener(priority, cb)
 
-    # -- lifecycle ---------------------------------------------------------------------
     async def load(self, path: str):
         if path in self.loaded:
             raise CogError(f"cog: {path}, is already loaded")
@@ -147,8 +143,8 @@ class CogManager:
             _logger.error(f"failed to unload cog: '{path}'")
             return False
 
-        await cog.context.unload()  # on_unload callbacks + command/listener cleanup
-        await self.reap(path)  # cog-owned tasks die here
+        await cog.context.unload()
+        await self.reap(path)
         self.loaded.pop(path)
         _logger.debug(f"unloaded cog: '{path}'")
         return True
@@ -157,10 +153,10 @@ class CogManager:
         if path not in self.loaded:
             _logger.error(f"failed to reload cog: '{path}'")
             return False
-        module = importlib.import_module(path)  # cached module object
+        module = importlib.import_module(path)
         await self.unload(path)
-        importlib.reload(module)  # fresh code, same sys.modules entry
-        await self.load(path)  # raises CogError if the new code is broken
+        importlib.reload(module)
+        await self.load(path)
         return True
 
     async def on_message(self, message):

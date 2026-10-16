@@ -18,6 +18,7 @@ import leech.core.command.slash.resolver as slash_resolver
 import leech.core.command.slash.invoker as slash_invoker
 from dataclasses import dataclass
 from enum import Enum, auto
+from leech.core.command.slash.execution import execute_slash
 
 import asyncio
 import discord
@@ -43,44 +44,6 @@ class UserphoneSession:
     hangup_command: slash_resolver.ResolvedSlashCommand
     display_mode: DisplayMode = DisplayMode.NICKNAME
     call_state: CallState = CallState.IDLE
-
-
-
-async def get_interaction_result(
-    interaction: discord.Interaction,
-    *,
-    timeout: float = 5.0,
-) -> str | None:
-    elapsed = 0.0
-    interval = 0.25
-
-    while elapsed < timeout:
-        message = interaction.message
-        if message is not None:
-            break
-
-        await asyncio.sleep(interval)
-        elapsed += interval
-
-    message = interaction.message
-    if message is None:
-        return None
-
-    parts: list[str] = []
-
-    if message.content:
-        parts.append(message.content)
-
-    for embed in message.embeds:
-        if embed.title:
-            parts.append(embed.title)
-        if embed.description:
-            parts.append(embed.description)
-
-        for field in embed.fields:
-            parts.append(f"{field.name}: {field.value}")
-
-    return "\n".join(parts) or None
 
 
 class UserphoneCog(Cog):
@@ -222,7 +185,7 @@ class UserphoneCog(Cog):
         import re
         content = message.content.strip()
         content = re.sub(
-            r"\bnigger\b",
+            r"nigger",
             "nigga",
             content,
             flags=re.IGNORECASE,
@@ -342,22 +305,27 @@ class UserphoneCog(Cog):
 
         remote = await self.ensure_channel(sesh.remote_channel_id)
         await self.validate_remote_channel(remote)
-        interaction = await slash_invoker.invoke(sesh.call_command.command, 
-                                                 remote, # pyright: ignore reason validated
-                                                 {})
-        result = await get_interaction_result(interaction)
-        await invocation.message.reply(result or "i received a response, but couldn't read it 😟")
+        execution = await execute_slash(
+            self.context.client, sesh.call_command, remote, {},
+            application_id=sesh.target_bot_id,
+            command_name=" ".join(sesh.call_command.target))
+        harvested = await execution.settle()
+        await invocation.message.reply(
+            (harvested.render() if harvested else None)
+            or "i received a response, but couldn't read it 😟")
+        return None
 
     async def hangup(self, message: discord.Message, sesh: UserphoneSession):
         remote = await self.ensure_channel(sesh.remote_channel_id)
         await self.validate_remote_channel(remote)
-        interaction = await slash_invoker.invoke(sesh.hangup_command.command, 
-                                                 remote, # pyright: ignore reason validated
-                                                 {})
-
-        result = await get_interaction_result(interaction)
-        await message.reply(result or "i received a response, but couldn't read it 😟")
-       
+        execution = await execute_slash(
+            self.context.client, sesh.hangup_command, remote, {},
+            application_id=sesh.target_bot_id,
+            command_name=" ".join(sesh.hangup_command.target))
+        harvested = await execution.settle()
+        await message.reply(
+            (harvested.render() if harvested else None)
+            or "i received a response, but couldn't read it 😟")      
 
     async def hangup_handler(self, invocation: Invocation):
         sesh = self.ensure_session(invocation.message.channel.id)

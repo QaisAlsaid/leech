@@ -61,11 +61,10 @@ class CommandBinder:
         if descriptor.subcommands:
             raise BaseError("self command can't override subcommands.")
 
-        target = self.registry.get_command(descriptor.provider.target[0])
+        target_path = ".".join(descriptor.provider.target)
+        target = self.registry.get_command(target_path)
         if target is None:
-            raise BaseError(
-                f"self provider target does not exist: '{descriptor.provider.target}'."
-            )
+            raise BaseError(f"self provider target does not exist: '{target_path}'.")
 
         return Command(
             name=descriptor.name,

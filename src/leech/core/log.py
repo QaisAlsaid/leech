@@ -10,5 +10,3 @@ handler = logging.handlers.TimedRotatingFileHandler(
 )
 logger = logging.getLogger("leech")
 logger.addHandler(handler)
-# logging.getLogger("httpx").setLevel(logging.WARNING)
-# logging.getLogger("httpcore").setLevel(logging.WARNING)

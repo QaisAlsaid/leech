@@ -34,9 +34,20 @@ ATTEMPTS = 3
 MAX_ROUNDS = 3
 MODEL_CALL_BUDGET = 4
 MAX_ATTACHMENTS = 4
-MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024   # base64 inflates ~33% (gemini inline is fine with this)
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  
+
+import re
+import httpx
+from leech.core.helpers.interactions.model import media_kind
+
+URL_RE = re.compile(r"https?://[^\s)\"'<>\]]+") 
+
 
 class AiCog(Cog):
+    def note(self, channel_id: int, text: str) -> None:
+        if channel_id in self.ai.active:
+            self.ai.window(channel_id).push("(system)", 0, text)
+    
     def __init__(self, context: CogContext):
         super().__init__(context=context)
         self.context.add_on_load(self.load)
@@ -74,9 +85,6 @@ class AiCog(Cog):
         )
         if not self.context.add_command(ai.name, ai):
             raise CogError(f"i failed to load '{ai.name}' command.")
-
-    # ... get_talk / get_dry / get_persona / get_model / get_catalog / get_clear /
-    #     get_off / get_status: UNCHANGED from your current file — keep yours ...
 
     def get_model(self) -> dict[str, Command]:
         def leaf(name: str, description: str, handler, arguments=None, elevated: bool = False) -> Command:
@@ -190,10 +198,6 @@ class AiCog(Cog):
         lines = "\n".join(f"  {line}" for line in self.ai.usage())
         return f"{prefix}\n{lines}"
  
-    # ... request() / on_message / is_addressed / _reply_snippet / _reply /
-    #     say_handler / dry_handler / persona & clear & off handlers: exactly as
-    #     delivered last round ...
-
     def get_talk(self) -> dict[str, Command]:
         return {"talk": Command(
             name="talk", description="talk to me directly.",
@@ -230,12 +234,8 @@ class AiCog(Cog):
                             self.persona_set_handler, [Argument(
                                 name="prompt", description="the persona instructions.",
                                 usage_example="prompt=you are a pirate",
-                                type=TypesRegistry.require(Types.STR), required=True),
-                            Argument(
-                                name="reset", description="clear history on change (default: yes).",
-                                usage_example="reset=no",
-                                help_content="set to 'no' to keep the conversation history. i'll mark the change instead.",
-                                type=TypesRegistry.require(Types.BOOL), required=False)]),
+                                type=TypesRegistry.require(Types.STR), required=True)]
+                            ),
                 "show": leaf("show", "show the current persona.", self.persona_get_handler),
                 "clear": leaf("clear", "reset to my default persona (i.e. leech).",
                               self.persona_clear_handler),
@@ -274,17 +274,17 @@ class AiCog(Cog):
         if command.ai_visible is not None:
             return command.ai_visible
         if command.elevated:
-            return False                 # the assistant can never elevate
-        if path == "ai.talk":            # reentrancy latch (structural backup)
+            return False  
+        if path == "ai.talk":  
             return False
         if path.split(".")[0] == "sudo":
-            return False                 # the elevation grantor
+            return False    
         if isinstance(command.binding, SlashBinding):
             return False
         if not is_invocable(command.binding):
             return False
         return self.context.client.security.decide_ai(
-            user_id, f"command:{path}").allowed     # menu = may-run-for-this-user
+            user_id, f"command:{path}").allowed 
 
     def catalog(self, user_id: int) -> list[schema.CatalogEntry]:
         return schema.build_catalog(
@@ -298,7 +298,6 @@ class AiCog(Cog):
             return f"#{channel.name} of guild '{guild.name}'" # pyright: ignore
         return "a direct message"
 
-    # -- listener -------------------------------------------------------------------
     async def on_message(self, message: discord.Message):
         client = self.context.client
         if message.author.bot:
@@ -323,7 +322,7 @@ class AiCog(Cog):
         for form in (f"<@{client.user.id}>", f"<@!{client.user.id}>"): # pyright: ignore
             content = content.replace(form, " ")
         await self.request(message, content.strip() or "hi")
-        return True, None   # commands now run inside request() via the front door
+        return True, None  
 
     def is_addressed(self, message: discord.Message) -> bool:
         client = self.context.client
@@ -353,8 +352,9 @@ class AiCog(Cog):
         return f"{resolved.author.display_name}: {snippet}" # pyright: ignore
 
     async def _gather_attachments(self, message: discord.Message) -> list[Attachment]:
-        """direct + replied-to; downloads, caps count/size, marks viewability."""
         out: list[Attachment] = []
+        seen: set[str] = set()
+
         for att in await gather_attachments(message):
             if len(out) >= MAX_ATTACHMENTS:
                 break
@@ -362,16 +362,52 @@ class AiCog(Cog):
                 data = await att.read()
             except discord.HTTPException:
                 continue
+            seen.add(att.url)
             out.append(Attachment(
                 filename=att.filename or "attachment",
-                content_type=att.content_type,
-                size=att.size,
-                data=data,
-                viewable=(att.content_type or "").lower().startswith("image/")
-                         and len(data) <= MAX_ATTACHMENT_BYTES))
+                content_type=att.content_type, size=att.size, data=data,
+                viewable=(att.content_type or "").lower().startswith("image/")))
+
+        targets = [message]
+        ref = message.reference
+        resolved = (ref.cached_message or getattr(ref, "resolved", None)) if ref is not None else None
+        if resolved is None and ref is not None and ref.message_id is not None:
+            try:
+                resolved = await message.channel.fetch_message(ref.message_id)
+            except discord.HTTPException:
+                resolved = None
+        if isinstance(resolved, discord.Message):
+            targets.append(resolved)
+
+        for target in targets:
+            for url in URL_RE.findall(target.content or ""):
+                if len(out) >= MAX_ATTACHMENTS:
+                    break
+                if url in seen or media_kind(url, None) != "image":
+                    continue
+                seen.add(url)
+                fetched = await self._fetch_image(url)
+                if fetched is not None:
+                    data, content_type = fetched
+                    out.append(Attachment(
+                        filename=url.split("/")[-1].split("?")[0] or "image",
+                        content_type=content_type, size=len(data),
+                        data=data, viewable=True))
         return out
 
-    # -- the agent loop: emit -> run -> collect -> refeed -> reply --------------------
+    async def _fetch_image(self, url: str):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.content
+                content_type = (response.headers.get("content-type") or "image/png")
+        except httpx.HTTPError:
+            return None
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            return None
+        return data, content_type.split(";")[0].strip()
+
     async def request(self, message: discord.Message, content: str, *,
                       dry: bool = False) -> None:
         channel_id = message.channel.id
@@ -381,10 +417,9 @@ class AiCog(Cog):
         attachments = await self._gather_attachments(message)
         carried = content
         calls = 0
-        summary: list[str] = []   # accumulated results across rounds (for wrap-up)
+        summary: list[str] = []  
 
         for round_index in range(MAX_ROUNDS):
-            # -- model turn (with schema-retry) --------------------------------
             action: schema.AiAction | None = None
             feedback: str | None = None
             for _ in range(ATTEMPTS):
@@ -418,7 +453,6 @@ class AiCog(Cog):
                 await self._reply(message, "i couldn't turn that into a command 😟")
                 return
 
-            # -- pure chat: done --------------------------------------------------
             if not action.commands:
                 if dry:
                     await self._reply(message, f"```json\n{action.model_dump_json(indent=2)}\n```\n(dry run - nothing executed.)")
@@ -427,7 +461,6 @@ class AiCog(Cog):
                     await self._reply(message, action.reply or "…")
                 return
 
-            # -- execute commands, collect results ---------------------------------
             results: list[str] = []
             for index, requested in enumerate(action.commands):
                 confirmation = requested.reply or (action.reply if index == 0 else None)
@@ -463,15 +496,18 @@ class AiCog(Cog):
                                    command=requested.command, arguments=requested.arguments)
                     return
 
-                # marker AFTER the confirmation, BEFORE execution:
-                # the sweep must not capture our own narration
                 marker = discord.utils.time_snowflake(discord.utils.utcnow(), high=True)
                 chain = await self.context.client.dispatcher.run(message, inner)
                 outputs: list[str] = []
                 if chain is not None and chain.out:
-                    outputs = [str(entry) for entry in chain.out]      # structured first
+                    outputs = [str(entry) for entry in chain.out]
                 else:
-                    outputs = await self.collect_outputs(message, marker)
+                    if chain is not None:
+                        for execution in chain.executions:
+                            harvested = await execution.settle()
+                            if harvested is not None:
+                                outputs.append(harvested.render() or "")
+                    outputs += await self.collect_outputs(message, marker)
                 results.extend(f"(result) {line}" for line in outputs if line)
                 self.log.write(kind="run", principal=message.author.id,
                                command=requested.command, arguments=requested.arguments)
@@ -481,7 +517,6 @@ class AiCog(Cog):
                        + "\nrespond with the answer to the user, or more commands "
                          "if genuinely needed.")
 
-        # -- rounds exhausted: force a wrap-up reply ------------------------------
         if calls < MODEL_CALL_BUDGET:
             calls += 1
             try:
@@ -489,7 +524,7 @@ class AiCog(Cog):
                     raw = await self.ai.chat(
                         channel_id, "(system)", message.author.id,
                         "(system) you've used all your command rounds. reply to the "
-                        "user now — no more commands, summarize what happened.",
+                        "user now. no more commands, summarize what happened.",
                         system=system)
                 final = schema.AiAction.model_validate_json(schema.strip_fences(raw))
                 await self._reply(message, final.reply or "…")
@@ -498,10 +533,9 @@ class AiCog(Cog):
                 pass
         await self._reply(message, "i ran out of rounds 😟\n" + "\n".join(summary[-12:]))
 
+   
     async def collect_outputs(self, message: discord.Message,
                               marker_id: int) -> list[str]:
-        """post-run sweep of our own messages — captures every command's output,
-        because everything a command shows the user is sent by leech."""
         me = self.context.client.user.id # pyright: ignore
         texts: list[str] = []
         after = discord.Object(id=marker_id)
@@ -519,11 +553,8 @@ class AiCog(Cog):
         return await message.reply(text[:REPLY_LIMIT], mention_author=False,
                                     allowed_mentions=discord.AllowedMentions.none())
 
-    # -- handlers ------------------------------------------------------------------
     async def say_handler(self, invocation: Invocation):
         if invocation.via == "ai":
-            # the structural latch: via now survives derive hops, so this fires
-            # even when the AI reaches ai.talk through cmd.invoke indirection.
             raise CogError("the assistant can't talk to itself 😁", is_user_error=True)
         self.ai.activate(invocation.message.channel.id)
         await self.request(invocation.message, invocation.arguments["message"])
@@ -543,7 +574,7 @@ class AiCog(Cog):
                              for a in entry.arguments)
             lines.append(f"`{entry.command}`"
                          + (f" [{args}]" if args else "")
-                         + f" — {entry.description}")
+                         + f" - {entry.description}")
         payload = schema.catalog_prompt_block(entries)
         lines.append("")
         lines.append(f"> {len(entries)} commands, {len(payload)} chars "
@@ -614,17 +645,12 @@ class AiCog(Cog):
 
     async def persona_set_handler(self, invocation: Invocation):
         channel_id = invocation.message.channel.id
-        reset = invocation.arguments.get("reset", True)
         self.ai.set_persona(channel_id, invocation.arguments["prompt"])
-        if reset:
-            self.ai.window(channel_id).clear()
-            await invocation.message.reply("persona set, history cleared.")
-        else:
-            self.ai.window(channel_id).push(
+        self.ai.window(channel_id).push(
                 "(system)", 0,
                 "(the persona has been changed; ignore any earlier personality "
                 "in this conversation and follow the new one.)")
-            await invocation.message.reply("persona set (history kept, change marked).")
+        await invocation.message.reply("persona set (history kept, change marked).")
 
     async def persona_get_handler(self, invocation: Invocation):
         await invocation.message.reply(self.ai.persona(invocation.message.channel.id))
@@ -641,13 +667,6 @@ class AiCog(Cog):
     async def off_handler(self, invocation: Invocation):
         self.ai.deactivate(invocation.message.channel.id)
         await invocation.message.reply("ok, but, its all history stoopid stoopid man 😢🇧🇷.")
-
-
-
-
-    # ... persona / model / clear / off / status / catalog handlers: UNCHANGED —
-    #     keep yours, including the model group and its owner gate ...
-
 
 def create_cog(context: CogContext):
     return AiCog(context=context)

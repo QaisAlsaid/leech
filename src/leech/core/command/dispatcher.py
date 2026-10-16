@@ -17,7 +17,7 @@ class CommandDispatcher:
     def __init__(self, registry: CommandRegistry, client):
         self.registry = registry
         self.client = client
-        self.authorizer: Callable | None = None  # installed by the auth cog
+        self.authorizer: Callable | None = None
 
     async def error(
         self, message: discord.Message, error_message: str, is_user_error: bool = True
@@ -31,8 +31,6 @@ class CommandDispatcher:
     async def run(
         self, message: discord.Message, invocation: Invocation | None
     ) -> Chain | None:
-        """the ONLY execution path. every hop is authorized here — humans,
-        chains, AI-derived invocations, sudo-elevated hops: one door."""
         if invocation is None:
             return None
         chain = invocation.chain
@@ -43,7 +41,7 @@ class CommandDispatcher:
                     raise BaseError(
                         f"command chain is too long: {CHAIN_MAX}, "
                         f"limit is: {CHAIN_MAX}.\n"
-                        "maybe try `>help concepts command-chain`."
+                        "maybe try `>help concepts command-chain`? 😁"
                     )
                 if self.authorizer is not None:
                     decision = await self.authorizer(message, invocation)

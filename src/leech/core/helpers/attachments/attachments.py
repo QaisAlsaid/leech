@@ -4,8 +4,6 @@ import discord
 
 
 async def gather_attachments(message: discord.Message) -> list[discord.Attachment]:
-    """the attachment convention: the invoking message's attachments, plus the
-    replied-to message's. shared by commands and the assistant."""
     sources = list(message.attachments)
     ref = message.reference
     resolved = ref.cached_message if ref is not None else None

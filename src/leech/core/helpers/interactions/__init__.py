@@ -6,3 +6,5 @@ from .model import (
     HarvestedMessage,
     harvest,
 )
+from .match import Match
+from .waiter import InteractionTimeout, ResponseWaiter, stabilize

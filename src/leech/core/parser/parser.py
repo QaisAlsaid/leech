@@ -64,31 +64,28 @@ class Parser:
     #    return self.context.arguments[self.current_positional_index]
 
     def is_last_argument(self, remaining: list[Token], arg: Argument):
-        unset = [
+        others = [
             desc
             for desc in self.context.arguments
-            if desc.name not in self.resolved and desc.name not in self.context.defaults
+            if desc.name != arg.name
+            and desc.name not in self.resolved
+            and desc.name not in self.context.defaults
         ]
 
-        if len(unset) <= 1:
+        if not others:
             return True
 
         for token in remaining:
             if token.type == TokenType.ASSIGN:
                 return False
 
-        for desc in self.context.arguments:
-            if (
-                desc.required
-                and desc.name not in self.resolved
-                and desc.name not in self.context.defaults
-            ):
+        for desc in others:
+            if desc.required:
                 return False
 
         return True
 
     # def is_last_argument(self, remaining: list[Token], arg: Argument):
-    #     # rule: if there is an optional argument, and the last non-optional has cardinality of MANY the non-optional wins the rest of tokens, unless there was an explicit assign.
     #     if len(self.resolved) + 1 >= len(self.context.arguments):
     #         return True
     #

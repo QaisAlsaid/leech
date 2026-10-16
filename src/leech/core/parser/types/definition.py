@@ -9,6 +9,7 @@ class Types(str, Enum):
     BOOL = "bool"
     STR = "str"
     USER = "user"
+    ROLE = "role"
     CHANNEL = "channel"
     ATTACHMENT = "attachment"
 

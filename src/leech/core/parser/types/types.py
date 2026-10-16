@@ -112,3 +112,19 @@ class ChannelType(TypeDefinition):
             return int(raw)
         except ValueError as e:
             raise ParseError(f"invalid channel: '{raw}") from e
+
+
+class RoleType(TypeDefinition):
+    def __init__(self):
+        super().__init__(
+            type=Types.CHANNEL,
+            description="a discord role.",
+            usage_example="value=<@&749353351530938370>",
+            help_content="a type that is capable of represinting a discord role (raw numeric id or direct mention).",
+        )
+
+    def parse(self, raw: str, arg: Argument) -> int:
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise ParseError(f"invalid role: '{raw}") from e

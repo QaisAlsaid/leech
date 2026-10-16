@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "leech"
-version = "0.1.0"
+version = "0.1.0-beta"
 requires-python = ">=3.13"
 dependencies = [
     "discord.py-self==2.1.0",
     "python-dotenv==1.2.4",
     "pydantic==2.13.5",
     "httpx==0.28.1",
+    "Pillow==12.3.0"
 ]
 
 [tool.setuptools.packages.find]

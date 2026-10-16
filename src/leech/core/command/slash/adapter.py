@@ -26,15 +26,11 @@ def argument_type_from_option_type(
         case discord.ApplicationCommandOptionType.user:
             return Types.USER
         case discord.ApplicationCommandOptionType.channel:
-            return Types.ATTACHMENT
+            return Types.CHANNEL
         case discord.ApplicationCommandOptionType.role:
-            if not permissive:
-                unsupported(optiontype)
-            return None
+            return Types.ROLE
         case discord.ApplicationCommandOptionType.mentionable:
-            if not permissive:
-                unsupported(optiontype)
-            return None
+            return Types.USER
         case discord.ApplicationCommandOptionType.number:
             return Types.NUM
         case discord.ApplicationCommandOptionType.attachment:

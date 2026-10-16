@@ -35,6 +35,11 @@ def resolve_command(
 
         candidate = f"{path_raw}.{tokens[index].raw}"
         subcommand = registry.get_command(candidate)
+        _logger.debug(
+            "command candidate: %r -> %s",
+            candidate,
+            "FOUND" if subcommand is not None else "missing",
+        )
         if subcommand is None:
             break
 
@@ -42,5 +47,10 @@ def resolve_command(
         command = subcommand
         index += 1
 
-    _logger.debug(f"resolved command: path: {path_raw}, args: {tokens[index:]}")
+    _logger.debug(
+        "resolved command: path=%r args=%r tokens=%r",
+        path_raw,
+        [t.raw for t in tokens[index:]],
+        [t.raw for t in tokens],
+    )
     return ResolvedCommand(command=command, args=tokens[index:], path=path_raw)

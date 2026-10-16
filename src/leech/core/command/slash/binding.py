@@ -1,11 +1,9 @@
 from typing import override
 
-import discord
-
 from leech.core.command.binding import Binding
 from leech.core.command.invocation import Invocation
-from .error import SlashError
-from . import resolver, invoker
+from . import execution as slash_execution
+from . import resolver
 
 
 class SlashBinding(Binding):
@@ -15,9 +13,11 @@ class SlashBinding(Binding):
 
     @override
     async def invoke(self, invocation: Invocation):
-        resolved = await resolver.resolve_target(
-            invocation.message.channel, self.target, self.bot
+        channel = invocation.message.channel
+        client = invocation.message._state.client
+        resolved = await resolver.resolve_target(channel, self.target, self.bot)
+        execution = await slash_execution.execute_slash(
+            client, resolved, channel, invocation.arguments, application_id=self.bot
         )
-        await invoker.invoke(
-            resolved.command, invocation.message.channel, invocation.arguments
-        )
+        invocation.chain.executions.append(execution)
+        return None

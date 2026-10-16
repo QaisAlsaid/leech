@@ -9,6 +9,7 @@ from leech.core.command.native.binding import NativeBinding
 from leech.core.command.mock.binding import MockBinding
 from leech.core.cog.error import CogError
 from leech.core.permissions import is_owner
+import leech.config as config
 
 
 class SudoCog(Cog):
@@ -17,7 +18,6 @@ class SudoCog(Cog):
         self.context.add_on_load(self.load)
 
     async def load(self):
-        # the modifier itself
         sudo = Command(
             name="sudo",
             description="run a command with elevation (owner only).",
@@ -58,8 +58,9 @@ class SudoCog(Cog):
         if not self.context.add_command(doas.name, doas):
             raise CogError(f"failed to load '{doas.name}' self-command.")
 
-        # the old sudo toolbox, now standalone roots — elevated where destructive
-        for name, command in (self.get_cog() | self.get_echo()).items():
+        for name, command in (
+            self.get_cog() | self.get_echo() | self.get_version()
+        ).items():
             if not self.context.add_command(name, command):
                 raise CogError(f"failed to load '{name}' command")
 
@@ -139,6 +140,19 @@ class SudoCog(Cog):
             )
         }
 
+    def get_version(self) -> dict[str, Command]:
+        return {
+            "version": Command(
+                name="version",
+                description="tell the currnt leech version.",
+                usage_example=">version",
+                arguments=[],
+                subcommands={},
+                binding=NativeBinding(handler=self.version_handler),
+                is_root=True,
+            )
+        }
+
     def _cogs(self):
         return self.context.client.cogs
 
@@ -175,6 +189,9 @@ class SudoCog(Cog):
 
     async def echo_handler(self, invocation: Invocation):
         await invocation.message.reply(str(invocation.arguments["message"]))
+
+    async def version_handler(self, invocation: Invocation):
+        await invocation.message.reply(f"leech version: `{config.version_str}`.")
 
 
 def create_cog(context: CogContext):

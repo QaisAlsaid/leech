@@ -21,7 +21,6 @@ class AuthCog(Cog):
         super().__init__(context=context)
         self.context.add_on_load(self.load)
         self.context.add_on_unload(self.unload)
-        # FIRST slot: deny = consume silently (drops the message for every listener)
         self.context.add_on_message(Priority.FIRST, self.gate)
 
     async def load(self):
@@ -61,7 +60,6 @@ class AuthCog(Cog):
     async def unload(self):
         self.context.client.dispatcher.authorizer = None
 
-    # -- the two gates ----------------------------------------------------------
     async def gate(self, message: discord.Message):
         if message.author.bot:
             return False, None
@@ -69,7 +67,7 @@ class AuthCog(Cog):
             message.author.id, "message:*"
         )
         if not decision.allowed:
-            return True, None  # consume: silent drop
+            return True, None
         return False, None
 
     async def check(self, message: discord.Message, invocation: Invocation) -> Decision:
@@ -78,7 +76,6 @@ class AuthCog(Cog):
         path = self.context.client.commands.path_of(command) or command.name
         scope = f"command:{path}"
 
-        # structural rules — invariants, not policy:
         if command.elevated and not invocation.elevated:
             return Decision(
                 False, f"'{path}' is privileged. run it as `>sudo {path} ...` 😁."
@@ -92,7 +89,6 @@ class AuthCog(Cog):
             return security.decide_ai(message.author.id, scope)
         return security.decide_user(message.author.id, scope)
 
-    # -- commands ---------------------------------------------------------------
     def get_subcommands(self) -> dict[str, Command]:
         user_arg = Argument(
             name="user",

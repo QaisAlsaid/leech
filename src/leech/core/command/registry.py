@@ -16,10 +16,6 @@ def is_valid_identifier(s: str) -> bool:
 class CommandRegistry:
     def __init__(self):
         self.registered_commands: dict[str, Command] = {}
-        # id(Command) -> [paths]. self-bindings share child objects with their
-        # target, so aliases append a second path. the canonical root always
-        # registers FIRST (bind_self requires the target to exist) — so
-        # paths[0] is canonical and path_of is alias-proof.
         self._paths: dict[int, list[str]] = {}
 
     def register_command(self, path: str, cmd: Command) -> bool:
@@ -57,7 +53,7 @@ class CommandRegistry:
     def unregister_command(self, path: str) -> Command | None:
         cmd = self.registered_commands.pop(path, None)
         if cmd is None:
-            _logger.error(f"failed to unregister command: '{path}'.")
+            _logger.warn(f"failed to unregister command: '{path}'.")
             return None
         paths = self._paths.get(id(cmd), [])
         if path in paths:
