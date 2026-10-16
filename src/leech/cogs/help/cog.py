@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from leech.core.cog.cog import Cog, CogContext
 from leech.core.command.binding import Binding
 from leech.core.command.runtime import Command, Argument
@@ -169,6 +171,199 @@ def format_argument_details(command: Command, argument: Argument, path: str) -> 
 
     return "\n".join(lines)
 
+@dataclass
+class Concept:
+    blurb: str
+    body: str
+
+
+CONCEPTS: dict[str, Concept] = {
+    "identifiers": Concept(
+        blurb="how command names work, and why dots are special.",
+        body=(
+            "a command name is a single word: letters, digits, `_` and `-`, and it "
+            "can't start with a digit. `todo`, `set-editor` and `fc2` are all valid "
+            "names. `img google` is not one name, it's two **words**.\n\n"
+            "dots are never part of a name. they are the registry's path "
+            "separator. `todo.add` is the *path* of `add` inside `todo`. you "
+            "invoke with spaces (`>todo add`). paths use dots, but user facing (`>help todo add`).\n\n"
+            "template names may be dotted, and there it means nesting: a template "
+            "called `fc.level` attaches as the `level` subcommand of the `fc` "
+            "group, creating the group if needed. nesting only works under "
+            "groups leech generated or flat template commands. never under "
+            "built-in roots like `todo`, since injecting into them would corrupt "
+            "them."
+        ),
+    ),
+    "arguments": Concept(
+        blurb="the parsing grammar: named, positional, greedy, defaults, quoting.",
+        body=(
+            "commands take arguments two ways, and they compose.\n\n"
+            "**named**: `name=value`. the value is one token, except greedy (STR) "
+            "arguments which swallow everything up to the next `known-name=`\n"
+            "```\n"
+            ">todo add task=buy milk\n"
+            ">cmd invoke slash @fergun invocation=\"img google query=bird nice\"\n"
+            "```\n"
+            "**positional**: bare tokens fill arguments in declaration order:\n"
+            "```\n"
+            ">tr hi -to arabic\n"
+            "```\n"
+            "the rules, exactly as they are applied:\n"
+            "1. `name=` always wins: a token followed by `=` is a named argument, "
+            "never a positional.\n"
+            "2. positionals fill arguments in declaration order, skipping any "
+            "argument already set by name or by default.\n"
+            "3. arguments with defaults are invisible to positional filling. they "
+            "never consume bare tokens.\n"
+            "4. a greedy (STR) argument swallows all remaining tokens when every "
+            "other unset argument is optional and no `name=` follows. otherwise it "
+            "takes a single token.\n"
+            "5. quoting collapses multi-word values into one token: "
+            "`>img \"hot femboy\"`.\n\n"
+            "rule of thumb: put greedy arguments last, name everything else, or quote."
+        ),
+    ),
+    "types": Concept(
+        blurb="the argument types and what they accept.",
+        body=(
+            "every argument has a type that parses and validates it:\n\n"
+            "- `int`: a whole number. `index=2`\n"
+            "- `num`: a decimal number. `value=6.7`\n"
+            "- `bool`: truthy: `true`, `on`, `yes`; falsy: `false`, `off`, `no`. "
+            "`active=yes`\n"
+            "- `str`: text, greedy (see `>help concepts arguments`). quote values "
+            "with spaces: `task='buy milk'`\n"
+            "- `user`: a mention `<@id>` or a raw numeric id.\n"
+            "- `channel`: a mention `<#id>` or a raw id.\n"
+            "- `role`: a mention `<@&id>` or a raw id.\n"
+            "- `attachment`: an https url to a file.\n\n"
+            "mentions you type are rewritten by the discord client into their "
+            "`<@id>` forms before leech ever sees them. which is why `bot=@fergun` "
+            "and `bot=<@id>` are the same thing."
+        ),
+    ),
+    "command-chain": Concept(
+        blurb="how commands compose: handlers return the next command.",
+        body=(
+            "a handler may return the next command to run. that's a chain hop, "
+            "and the dispatcher keeps invoking until nothing is returned. that's "
+            "how composition works:\n\n"
+            "- `>cmd invoke leech todo list` resolves `todo list`, parses your "
+            "tokens against its arguments, and returns it as the next hop.\n"
+            "- `>sudo <command>` re-resolves whatever you gave it and returns it "
+            "elevated.\n\n"
+            "what rides along a hop: the result bus (structured output), the "
+            "execution journal, and `via` (who really started this chain. you or "
+            "the assistant). what never rides along: elevation sudo grants it "
+            "fresh every time, and nothing else can.\n\n"
+            "chains are capped at 64 hops, so a loop can't run forever. don't try, ai is limited to only 3."
+        ),
+    ),
+    "perms": Concept(
+        blurb="owners, grants, scopes, sudo, and what the assistant may do.",
+        body=(
+            "owners (env `OWNER_ID`, comma separated) pass everything. everyone "
+            "else is denied by default and unlocked with grants:\n"
+            "```\n"
+            ">opsec allow user=@opposingfork scope=command:todo.*\n"
+            ">opsec allow user=@friend scope=*\n"
+            "```\n"
+            "scopes: `command:todo.*` (a subtree), `command:*`, `message:*` "
+            "(talking to the assistant), `*`. the most specific rule wins. deny "
+            "beats allow on a tie.\n\n"
+            "**sudo** is not a permission — it's elevation, for commands that "
+            "damage the bot itself (cog load/unload/reload, removing models). "
+            "owner-only and human-only, structurally: the assistant can never "
+            "elevate, no matter what.\n\n"
+            "**the assistant** acts as you: it can never exceed your grants, and "
+            "you can limit it per command (`>ai perms deny command=todo.discard`). "
+            "it can also never touch `>auth` or `sudo`. this is hardcoded, not "
+            "configuration."
+        ),
+    ),
+    "cogs": Concept(
+        blurb="hot-reloadable modules that own commands, listeners and tasks.",
+        body=(
+            "cogs are hot-swappable modules that own commands, message listeners, "
+            "and background tasks:\n"
+            "```\n"
+            ">sudo cog list\n"
+            ">sudo cog reload path=leech.cogs.ai.cog\n"
+            "```\n"
+            "on unload, everything a cog registered is cleaned: commands "
+            "unregistered, listeners disposed, tasks cancelled. a reload never "
+            "leaks. a failing load rolls back and logs; it can't take the bot "
+            "down. one bad persisted template is a skipped line in the lo*g*, not a "
+            "dead co*g*.\n\n"
+            "load order is part of the contract: `auth` first (it owns the first "
+            "listener slot (the permission gate)), `ai` last (its catalog wants "
+            "the full registry)."
+        ),
+    ),
+    "templates": Concept(
+        blurb="persisted invocation shortcuts for leech, slash and prefix commands.",
+        body=(
+            "a template is a persisted shortcut for an invocation:\n"
+            "```\n"
+            ">cmd invoke template command=img type=leech invocation=\"fergun img google\"\n"
+            ">img hot femboy\n"
+            "```\n"
+            "it has three types: `leech` (an alias to one of my commands), `slash` "
+            "(another bot's slash command. needs `bot=`), and `prefix` (another "
+            "bot's prefix command. `bot=` optional: with it the reply is "
+            "collected and echoed, without it it's fire and forget never echoed).\n\n"
+            "dotted names nest: `fc.level` becomes `>fc level` under the `fc` "
+            "group. a template pins its execution `channel` and `echo` policy at "
+            "creation. both editable later (`>cmd invoke template edit`), and "
+            "recreating under the same name replaces it. templates persist across "
+            "restarts. the assistant can create them too. **but can never see created templates by default unless you add it to its catalog.**"
+        ),
+    ),
+    "echo": Concept(
+        blurb="what comes back when leech invokes another bot for you.",
+        body=(
+            "when leech invokes another bot for you, `echo` decides what comes "
+            "back: `echo=<kinds>[,when]`\n\n"
+            "- kinds: `text`, `image`, `video`, `audio`, `file`, `buttons` (or "
+            "`media` = image+video+audio)\n"
+            "- when: `auto` (default (only what you can't already see)), `always`, "
+            "`never`\n\n"
+            "examples: `echo=images`, `echo=always,media`, "
+            "`echo=text,audio,buttons`.\n\n"
+            "images echo as links and render inline; audio re-uploads so it plays "
+            "in app. attachment links expire in a day approx. "
+            "responses carrying buttons always get a pressable echo. reply to it "
+            "with a number to press, it mirrors the original as it changes."
+        ),
+    ),
+    "ai": Concept(
+        blurb="the assistant: what it can run, what it sees, how to control it.",
+        body=(
+            "mention me (or reply to me) and ai answers. it can run commands on your "
+            "behalf: \"add buy milk to my todo\". and it can see each "
+            "command's results, so multi-step asks work in one message: \"make a "
+            "list called our_songs and add bord bard bird\".\n\n"
+            "its catalog of commands is filtered by what you can do and what you've "
+            "allowed it see (`>ai perms`)."
+        ),
+    ),
+}
+
+CONCEPT_ALIASES = {
+    "parsing": "arguments",
+    "named": "arguments",
+    "positional": "arguments",
+    "grammar": "arguments",
+    "permissions": "perms",
+    "chain": "command-chain",
+    "cog": "cogs",
+    "template": "templates",
+    "assistant": "ai",
+    "button": "echo",
+    "buttons": "echo",
+}
+
 
 class HelpCog(Cog):
     def __init__(self, context: CogContext):
@@ -296,7 +491,30 @@ class HelpCog(Cog):
             message = await message.reply(chunk)
 
     async def concepts_handler(self, invocation: Invocation):
-        raise CogError("concepts are not implemented at the moment.")
+        raw = invocation.arguments.get("concept")
+
+        if raw is None or not str(raw).strip():
+            lines = ["**concepts**: leech specific things that affect the usage:"]
+            for key, concept in CONCEPTS.items():
+                lines.append(f"- `{key}` - {concept.blurb}")
+            lines.append("")
+            lines.append("pick one: `>help concepts concept=arguments`")
+            text = "\n".join(lines)
+        else:
+            key = str(raw).strip().lower().replace(" ", "-")
+            key = CONCEPT_ALIASES.get(key, key)
+            concept = CONCEPTS.get(key)
+            if concept is None:
+                known = ", ".join(f"`{k}`" for k in CONCEPTS)
+                raise CogError(
+                    f"unknown concept: '{raw}'. available: {known}.",
+                    is_user_error=True,
+                )
+            text = f"**concept: {key}**\n\n{concept.body}"
+
+        message = invocation.message
+        for chunk in splitter.split(text):
+            message = await message.reply(chunk)
 
 
 def create_cog(context: CogContext):
