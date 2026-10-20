@@ -30,7 +30,7 @@ COGS = [
     "leech.cogs.ytdlp.cog",
     "leech.cogs.mono.cog",
     "leech.cogs.lrc.cog",
-    "leech.cog.ffmpeg.cog",
+    "leech.cogs.ffmpeg.cog",
     "leech.cogs.ai.cog",  # always last
 ]
 
