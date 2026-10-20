@@ -26,6 +26,7 @@ import leech.core.helpers.text.splitter as splitter
 
 import json
 import logging
+import os
 
 _logger = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ from leech.core.helpers.interactions.model import media_kind
 
 URL_RE = re.compile(r"https?://[^\s)\"'<>\]]+")
 
+AI_URL = (os.getenv("LEECH_AI_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
+AI_TOKEN = (os.getenv("LEECH_AI_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or "").strip()
+AI_BACKEND = (os.getenv("LEECH_AI_BACKEND") or "").strip().lower()
+AI_KEYS = bool((os.getenv("GEMINI_API_KEY") or "").strip() or (os.getenv("GROQ_API_KEY") or "").strip())
 
 class AiCog(Cog):
     def note(self, channel_id: int, text: str) -> None:
@@ -50,15 +55,18 @@ class AiCog(Cog):
 
     def __init__(self, context: CogContext):
         super().__init__(context=context)
-        if not config.ai_keys:
+        if not (AI_URL or AI_KEYS or AI_BACKEND):
+            _logger.warning(
+                "ai cog: no manager url (LEECH_AI_URL or LEECH_TTS_URL) and no "
+                "provider keys (GEMINI_API_KEY / GROQ_API_KEY). not loading"
+            )
             return
         self.context.add_on_load(self.load)
         self.context.add_on_message(Priority.LOW, self.on_message)
         self.ai = AiService(
-            chain=config.ai_chain,
-            keys=config.ai_keys,
+            manager_url=AI_URL,
+            manager_token=AI_TOKEN,
             thinking=config.ai_thinking,
-            read_timeout=config.ai_read_timeout,
             turn_deadline=config.ai_turn_deadline,
             window_limit=config.ai_window_limit,
             window_budget=config.ai_window_budget,
@@ -87,6 +95,7 @@ class AiCog(Cog):
                 | self.get_model()
                 | self.get_catalog()
                 | self.get_clear()
+                | self.get_on()
                 | self.get_off()
                 | self.get_status()
             ),
@@ -115,10 +124,7 @@ class AiCog(Cog):
                 description="view and reconfigure my model chain (owner only).",
                 usage_example=">ai model list",
                 help_content=(
-                    "the chain is ordered: the first model is the main, the rest are fallbacks "
-                    "tried in order. changes persist across restarts. `reset` returns to the "
-                    "startup default. `budget` sizes the context window, keep small for "
-                    "models with tight TPMs."
+                    "the chain is ordered: the first model is the main, the rest are fallbacks, they run in order."
                 ),
                 arguments=[],
                 binding=MockBinding(),
@@ -261,7 +267,7 @@ class AiCog(Cog):
         if user is not None and user != invocation.message.author.id:
             if not is_owner(invocation.message.author.id):
                 raise CogError(
-                    "only my owner may configure someone else's delegation.",
+                    "only owner may configure someone else's delegation.",
                     is_user_error=True,
                 )
             return user
@@ -301,9 +307,13 @@ class AiCog(Cog):
         if not is_owner(invocation.message.author.id):
             raise CogError("only owner touches my private parts 😁", is_user_error=True)
 
-    def _chain_reply(self, prefix: str) -> str:
-        lines = "\n".join(f"  {line}" for line in self.ai.usage())
-        return f"{prefix}\n{lines}"
+    async def _chain_reply(self, prefix: str) -> str:
+        try:
+            lines, _daily = await self.ai.usage()
+        except AiError as e:
+            return f"{prefix}\n  (couldn't list the chain: {e.message})"
+        body = "\n".join(f"  {line}" for line in lines)
+        return f"{prefix}\n{body}"
 
     def get_talk(self) -> dict[str, Command]:
         return {
@@ -372,7 +382,7 @@ class AiCog(Cog):
                             Argument(
                                 name="prompt",
                                 description="the persona instructions.",
-                                usage_example="prompt=you are a pirate",
+                                usage_example="prompt=you are gay",
                                 type=TypesRegistry.require(Types.STR),
                                 required=True,
                             )
@@ -402,13 +412,26 @@ class AiCog(Cog):
             )
         }
 
+    def get_on(self) -> dict[str, Command]:
+        return {
+            "on": Command(
+                name="on",
+                description="restart chatting here, after you stopped.",
+                usage_example=">ai on",
+                arguments=[],
+                subcommands={},
+                binding=NativeBinding(handler=self.on_handler),
+            )
+        }
+
+
     def get_off(self) -> dict[str, Command]:
         return {
             "off": Command(
                 name="off",
                 description="stop chatting here and forget this channel.",
+                help_content="to reenable back use `>ai on`.",
                 usage_example=">ai off",
-                help_content="mention me again to start over with a clean memory.",
                 arguments=[],
                 subcommands={},
                 binding=NativeBinding(handler=self.off_handler),
@@ -433,7 +456,7 @@ class AiCog(Cog):
                 name="catalog",
                 description="show the commands i can see and run.",
                 usage_example=">ai catalog",
-                help_content="roughly what i show the model: every visible command "
+                help_content="roughly what the model is shown: every visible command "
                 "with its arguments and defaults.",
                 arguments=[],
                 subcommands={},
@@ -477,6 +500,8 @@ class AiCog(Cog):
             return False, None
 
         channel_id = message.channel.id
+        if channel_id in self.ai.muted:
+            return False, None  # `>ai off` — ghosted until `>ai on`
         addressed = self.is_addressed(message)
 
         if channel_id not in self.ai.active:
@@ -512,7 +537,7 @@ class AiCog(Cog):
             resolved = ref.cached_message or getattr(ref, "resolved", None)
             if (
                 isinstance(resolved, discord.Message)
-                and resolved.author.id == client.user.id
+                and resolved.author.id == client.user.id # pyright: ignore
             ):  # pyright: ignore
                 return True
         return False
@@ -527,9 +552,7 @@ class AiCog(Cog):
                 resolved = await message.channel.fetch_message(ref.message_id)
             except discord.HTTPException:
                 return None
-        if (
-            not isinstance(resolved, discord.Message) or not resolved.content.strip()
-        ):  # pyright: ignore
+        if (not isinstance(resolved, discord.Message) or not resolved.content.strip()):  # pyright: ignore
             return None
         snippet = " ".join(resolved.content.split())[:120]  # pyright: ignore
         return f"{resolved.author.display_name}: {snippet}"  # pyright: ignore
@@ -740,7 +763,7 @@ class AiCog(Cog):
                     )
                     await self._reply(
                         message,
-                        f"```json\n{action.model_dump_json(indent=2)}\n```\n→ would run: `{requested.command}` with: {args}\n(dry run - nothing executed.)",
+                        f"```json\n{action.model_dump_json(indent=2)}\n```\n-> would run: `{requested.command}` with: {args}\n(dry run - nothing executed.)",
                     )
                     self.log.write(
                         kind="dry",
@@ -824,7 +847,7 @@ class AiCog(Cog):
 
     async def say_handler(self, invocation: Invocation):
         if invocation.via == "ai":
-            raise CogError("the assistant can't talk to itself 😁", is_user_error=True)
+            raise CogError("the assistant tried to talk to itself 😁", is_user_error=True)
         self.ai.activate(invocation.message.channel.id)
         await self.request(invocation.message, invocation.arguments["message"])
         return None
@@ -862,60 +885,70 @@ class AiCog(Cog):
     async def status_handler(self, invocation: Invocation):
         channel_id = invocation.message.channel.id
         window = self.ai.window(channel_id)
-        await invocation.message.reply(
-            "\n".join(
-                [
-                    "models:",
-                    *(f"  {line}" for line in self.ai.usage()),
-                    f"thinking: `{config.ai_thinking}` | read timeout: `{config.ai_read_timeout}s` | turn budget: `{config.ai_turn_deadline}s`",
-                    f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
-                    f"memory: {window.size()} messages, ~{window.chars()} chars (~{window.chars() // 4} tokens) of a {window.budget()} char budget",
-                    f"catalog: {len(self.catalog(invocation.message.author.id))} commands",
-                    f"active: {'yes' if channel_id in self.ai.active else 'no'}",
-                ]
+        try:
+            model_lines, daily = await self.ai.usage()
+        except AiError as e:
+            model_lines, daily = [f"  (unreachable: {e.message})"], {}
+        lines = [
+            "models:",
+            *(f"  {line}" for line in model_lines),
+            f"thinking: `{config.ai_thinking}` | turn budget: `{config.ai_turn_deadline}s` | service: {self.ai.service_name()}",
+        ]
+        if daily:
+            lines.append(
+                f"daily budget: {daily.get('used', 0)}/{daily.get('limit', 0)} chats"
             )
-        )
+        lines += [
+            f"persona: {'channel override' if channel_id in self.ai.personas else 'default'}",
+            f"memory: {window.size()} messages, ~{window.chars()} chars (~{window.chars() // 4} tokens) of a {window.budget()} char budget",
+            f"catalog: {len(self.catalog(invocation.message.author.id))} commands",
+            f"active: {'yes' if channel_id in self.ai.active else 'no'}",
+            f"muted: {'yes (use `>ai on`)' if channel_id in self.ai.muted else 'no'}",
+        ]
+        await invocation.message.reply("\n".join(lines))
 
     async def model_list_handler(self, invocation: Invocation):
-        await invocation.message.reply(self._chain_reply("model chain:"))
+        await invocation.message.reply(await self._chain_reply("model chain:"))
 
     async def model_add_handler(self, invocation: Invocation):
         self._require_owner(invocation)
         provider, _, model = invocation.arguments["model"].partition(":")
         position = invocation.arguments.get("position")
         try:
-            slot = await self.ai.add_slot(provider.strip(), model.strip(), position)
-        except ValueError as e:
+            key = await self.ai.add_slot(provider.strip(), model.strip(), position)
+        except AiError as e:
             raise CogError(
-                f"i couldn't add that model. details: {e}", is_user_error=True
+                f"i couldn't add that model. details: {e.message}", is_user_error=True
             ) from e
-        await invocation.message.reply(self._chain_reply(f"added `{slot.key}`. chain:"))
+        await invocation.message.reply(
+            await self._chain_reply(f"added `{key}`. chain:")
+        )
 
     async def model_remove_handler(self, invocation: Invocation):
         self._require_owner(invocation)
         try:
             await self.ai.remove_slot(invocation.arguments["model"].strip())
-        except ValueError as e:
+        except AiError as e:
             raise CogError(
-                f"i couldn't remove that model. details: {e}", is_user_error=True
+                f"i couldn't remove that model. details: {e.message}", is_user_error=True
             ) from e
-        await invocation.message.reply(self._chain_reply("removed. chain:"))
+        await invocation.message.reply(await self._chain_reply("removed. chain:"))
 
     async def model_main_handler(self, invocation: Invocation):
         self._require_owner(invocation)
         try:
             await self.ai.promote_slot(invocation.arguments["model"].strip())
-        except ValueError as e:
+        except AiError as e:
             raise CogError(
-                f"i couldn't promote that model. details: {e}", is_user_error=True
+                f"i couldn't promote that model. details: {e.message}", is_user_error=True
             ) from e
-        await invocation.message.reply(self._chain_reply("promoted. chain:"))
+        await invocation.message.reply(await self._chain_reply("promoted. chain:"))
 
     async def model_reset_handler(self, invocation: Invocation):
         self._require_owner(invocation)
         await self.ai.reset_chain()
         await invocation.message.reply(
-            self._chain_reply("chain reset to startup default:")
+            await self._chain_reply("chain reset to the manager's default:")
         )
 
     async def model_budget_handler(self, invocation: Invocation):
@@ -957,11 +990,21 @@ class AiCog(Cog):
         )
 
     async def off_handler(self, invocation: Invocation):
-        self.ai.deactivate(invocation.message.channel.id)
+        channel_id = invocation.message.channel.id
+        self.ai.mute(channel_id)
         await invocation.message.reply(
-            "ok, but, its all history stoopid stoopid man 😢🇧🇷."
+            "ok, i will ghost you."
+        )
+
+    async def on_handler(self, invocation: Invocation):
+        channel_id = invocation.message.channel.id
+        self.ai.unmute(channel_id)
+        self.ai.activate(channel_id)
+        await invocation.message.reply(
+            "ok, back to normal."
         )
 
 
 def create_cog(context: CogContext):
     return AiCog(context=context)
+

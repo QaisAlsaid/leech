@@ -62,7 +62,7 @@ class TodoContainer(BaseModel):
 
 container_adapter = TypeAdapter(dict[int, TodoContainer])
 MAX_LIST_NAME = 100
-MAX_TASKS = 500
+MAX_TASKS = 1000
 MAX_LISTS = 100
 
 

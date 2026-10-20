@@ -63,6 +63,7 @@ class TodoCog(Cog):
     def get_subcommands(self) -> dict[str, Command]:
         return {
             **self.get_add(),
+            **self.get_add_all(),
             **self.get_remove(),
             **self.get_update(),
             **self.get_list(),
@@ -95,6 +96,25 @@ class TodoCog(Cog):
             binding=NativeBinding(self.add_handler),
         )
         return {add.name: add}
+
+    def get_add_all(self) -> dict[str, Command]:
+        add_all = Command(
+            name="adds",
+            description="add '\\' separated tasks to the current active list.",
+            usage_example=">todo adds tasks=finish writing forkic novel!\\draw daily bird",
+            arguments=[
+                Argument(
+                    name="tasks",
+                    description="the tasks you wish to add ('\\' separated).",
+                    usage_example="tasks=finish writing forkic novel.\\draw daily bird",
+                    type=TypesRegistry.require(Types.STR),
+                    required=True,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.adds_handler),
+        )
+        return {add_all.name: add_all}
 
     def get_remove(self) -> dict[str, Command]:
         remove = Command(
@@ -152,20 +172,20 @@ class TodoCog(Cog):
             description="list all tasks list for the active list or a specific list.",
             usage_example=">todo list",
             arguments=[
-                Argument(
-                    name="author",
-                    description="the author of the list.",
-                    usage_example="author=@opposingfork",
-                    help_content="defaults to you if left blank",
-                    type=TypesRegistry.require(Types.USER),
-                    required=False,
-                ),
-                Argument(
+                               Argument(
                     name="list",
                     description="the list name to list its tasks.",
                     usage_example="list=my work list",
                     help_content="defaults to the current active list if left blank.",
                     type=TypesRegistry.require(Types.STR),
+                    required=False,
+                ),
+                                Argument(
+                    name="author",
+                    description="the author of the list.",
+                    usage_example="author=@opposingfork",
+                    help_content="defaults to you if left blank",
+                    type=TypesRegistry.require(Types.USER),
                     required=False,
                 ),
             ],
@@ -371,6 +391,14 @@ class TodoCog(Cog):
         task = invocation.arguments["task"]
         index = self.todo.add_task(invocation.message.author.id, task)
         await invocation.message.reply(f"added task: at index: {index}.")
+
+    async def adds_handler(self, invocation: Invocation):
+        tasks_raw = str(invocation.arguments["tasks"])
+        tasks = tasks_raw.split("\\")
+        indices = []
+        for task in tasks:
+            indices.append(self.todo.add_task(invocation.message.author.id, task))
+        await invocation.message.reply(f"added tasks: at indices: {indices[0]}...{indices[-1]}.")
 
     async def remove_handler(self, invocation: Invocation):
         index = invocation.arguments["index"]

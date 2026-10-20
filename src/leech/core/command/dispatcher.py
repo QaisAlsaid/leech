@@ -1,3 +1,5 @@
+import time
+import warnings
 from typing import Callable
 
 import discord
@@ -12,21 +14,46 @@ from leech.core.error import BaseError
 
 CHAIN_MAX = 64
 
+# at most one typing trigger per channel every 5s - safely under discord's
+# ~5-per-5s bucket even with several commands firing back to back.
+TYPING_COOLDOWN = 5.0
+
 
 class CommandDispatcher:
     def __init__(self, registry: CommandRegistry, client):
         self.registry = registry
         self.client = client
         self.authorizer: Callable | None = None
+        self._last_typing: dict[int, float] = {}
 
     async def error(
         self, message: discord.Message, error_message: str, is_user_error: bool = True
     ):
         title = "your fault 🚫🧠" if is_user_error else "my fault 🐛😁"
+        quoted = "\n> ".join(error_message.split("\n"))
         await message.reply(
-            f"**{title}**\n\n{'\n> '.join(error_message.split('\n'))}",
+            f"**{title}**\n\n{quoted}",
             mention_author=True,
         )
+
+    async def _typing_pulse(self, channel) -> None:
+        if channel is None:
+            return
+        channel_id = getattr(channel, "id", None)
+        trigger = getattr(channel, "trigger_typing", None)
+        if channel_id is None or trigger is None:
+            return
+        now = time.monotonic()
+        last = self._last_typing.get(channel_id, 0.0)
+        if now - last < TYPING_COOLDOWN:
+            return
+        self._last_typing[channel_id] = now
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                await trigger()
+        except discord.HTTPException:
+            pass
 
     async def run(
         self, message: discord.Message, invocation: Invocation | None
@@ -48,8 +75,8 @@ class CommandDispatcher:
                     if not decision.allowed:
                         await self.error(message, decision.reason, is_user_error=True)
                         return chain
-                async with message.channel.typing():
-                    invocation = await invocation.invoke()
+                await self._typing_pulse(message.channel)
+                invocation = await invocation.invoke()
                 count += 1
         except BaseError as err:
             await self.error(message, err.message, err.is_user_error)

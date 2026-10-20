@@ -26,6 +26,8 @@ COGS = [
     "leech.cogs.help.cog",
     "leech.cogs.userphone.cog",
     "leech.cogs.png.cog",
+    "leech.cogs.tts.cog",
+    "leech.cogs.ytdlp.cog",
     "leech.cogs.ai.cog",  # always last
 ]
 
