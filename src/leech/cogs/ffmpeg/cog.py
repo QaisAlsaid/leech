@@ -27,6 +27,7 @@ _logger = logging.getLogger(__name__)
 
 CONVERT_NAME = "convert"
 TRIM_NAME = "trim"
+ROOT_NAME = "ffmpeg"
 
 SERVER_URL = (
     os.getenv("LEECH_HUB_URL") or ""
@@ -226,19 +227,38 @@ class _Server:
         return data
 
     async def submit_convert(self, args: _Args, url: str) -> str:
-        data = await self._api("POST", "/api/ffmpeg/convert", body={
-            "url": url, "format": args.format or "mp3",
-            "bitrate": args.bitrate, "res": args.res, "crf": args.crf,
-            "fps": args.fps, "mute": args.mute,
-        })
+        body: dict = {"url": url, "format": args.format or "mp3"}
+        if args.bitrate is not None:
+            body["bitrate"] = args.bitrate
+        if args.res is not None:
+            body["res"] = args.res
+        if args.crf is not None:
+            body["crf"] = args.crf
+        if args.fps is not None:
+            body["fps"] = args.fps
+        if args.mute:
+            body["mute"] = True
+        data = await self._api("POST", "/api/ffmpeg/convert", body=body)
         return str(data["job"])
 
     async def submit_trim(self, args: _Args, url: str) -> str:
-        data = await self._api("POST", "/api/ffmpeg/trim", body={
-            "url": url, "format": args.format, "bitrate": args.bitrate,
-            "res": args.res, "crf": args.crf, "fps": args.fps, "mute": args.mute,
-            "start": _fmt_pos(args.start), "end": _fmt_pos(args.end),
-        })
+        body: dict = {
+            "url": url,
+            "format": args.format or "copy",
+            "start": _fmt_pos(args.start),
+            "end": _fmt_pos(args.end),
+        }
+        if args.bitrate is not None:
+            body["bitrate"] = args.bitrate
+        if args.res is not None:
+            body["res"] = args.res
+        if args.crf is not None:
+            body["crf"] = args.crf
+        if args.fps is not None:
+            body["fps"] = args.fps
+        if args.mute:
+            body["mute"] = True
+        data = await self._api("POST", "/api/ffmpeg/trim", body=body)
         return str(data["job"])
 
     async def job_status(self, job_id: str) -> dict:
@@ -264,53 +284,70 @@ class FfmpegCog(Cog):
             await self.server.aclose()
 
     async def load(self):
-        convert_cmd = Command(
-            name=CONVERT_NAME,
-            description="convert an audio or video file (attached or replied to or linked).",
-            usage_example=">convert mp3 320",
+        root = Command(
+            name=ROOT_NAME,
+            description="audio/video conversion + trimming, on the leech-hub.",
+            usage_example=">ffmpeg convert mp3 320",
             help_content=(
-                "the file comes from an attachment or the message you reply "
-                "to or a url in the command. audio formats: mp3 (default), "
-                "wav, flac, m4a, opus, copy (audio remux) + optional kbps "
-                "32-320. video formats: mp4, mkv, webm, gif + optional "
-                "res=/crf=/fps=/mute= (e.g. `>convert clip.mkv mp4 res=720`). "
-                "converting runs on the leech-hub, you get a cdn download link back."
+                "convert: `>ffmpeg convert [url] [format] [kbps] [opts]` - "
+                "audio mp3 (default) wav flac m4a opus copy + kbps, video "
+                "mp4 mkv webm gif + res= crf= fps= mute=. trim: "
+                "`>ffmpeg trim <start> <end> [url] [format] [opts]`. the file "
+                "comes from an attachment, the message you reply to, or a url. "
+                "everything runs on the leech-hub, you get a cdn link back."
             ),
-            arguments=[Argument(
-                name="what",
-                description="[url] [format] [kbps] [opts], e.g. 'mp3 320' or "
-                            "'https://... clip.mkv webm res=720'.",
-                usage_example="what=mp3 320",
-                type=TypesRegistry.require(Types.STR),
-                required=True,
-            )],
-            subcommands={},
-            binding=NativeBinding(handler=self.convert_handler),
+            arguments=[],
+            subcommands={
+                "convert": Command(
+                    name=CONVERT_NAME,
+                    description="convert an audio or video file (attached or replied to or linked).",
+                    usage_example=">ffmpeg convert mp3 320",
+                    help_content=(
+                        "the file comes from an attachment or the message you reply "
+                        "to or a url in the command. audio formats: mp3 (default), "
+                        "wav, flac, m4a, opus, copy (audio remux) + optional kbps "
+                        "32-320. video formats: mp4, mkv, webm, gif + optional "
+                        "res=/crf=/fps=/mute= (e.g. `>ffmpeg convert clip.mkv mp4 res=720`). "
+                        "converting runs on the leech-hub, you get a cdn download link back."
+                    ),
+                    arguments=[Argument(
+                        name="what",
+                        description="[url] [format] [kbps] [opts], e.g. 'mp3 320' or "
+                                    "'https://... clip.mkv webm res=720'.",
+                        usage_example="what=mp3 320",
+                        type=TypesRegistry.require(Types.STR),
+                        required=True,
+                    )],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.convert_handler),
+                ),
+                "trim": Command(
+                    name=TRIM_NAME,
+                    description="cut a slice out of an audio or video file.",
+                    usage_example=">ffmpeg trim 1:30 2:05",
+                    help_content=(
+                        "times are seconds or m:ss or h:mm:ss. without a format "
+                        "it's a stream copy. instant and lossless but the cut "
+                        "points snap a bit early/late. name a format (any convert "
+                        "format + opts) to reencode for exact cuts. source: "
+                        "attachment, the message you reply to, or a url."
+                    ),
+                    arguments=[Argument(
+                        name="what",
+                        description="<start> <end> [url] [format] [opts].",
+                        usage_example="what=1:30 2:05 mp3",
+                        type=TypesRegistry.require(Types.STR),
+                        required=True,
+                    )],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.trim_handler),
+                ),
+            },
+            binding=MockBinding(),
+            is_root=True,
         )
-        trim_cmd = Command(
-            name=TRIM_NAME,
-            description="cut a slice out of an audio or video file.",
-            usage_example=">trim 1:30 2:05",
-            help_content=(
-                "times are seconds or m:ss or h:mm:ss. without a format "
-                "it's a stream copy. instant and lossless but the cut "
-                "points snap a bit early/late. name a format (any convert "
-                "format + opts) to reencode for exact cuts. source: "
-                "attachment, the message you reply to, or a url."
-            ),
-            arguments=[Argument(
-                name="what",
-                description="<start> <end> [url] [format] [opts].",
-                usage_example="what=1:30 2:05 mp3",
-                type=TypesRegistry.require(Types.STR),
-                required=True,
-            )],
-            subcommands={},
-            binding=NativeBinding(handler=self.trim_handler),
-        )
-        for command in (convert_cmd, trim_cmd):
-            if not self.context.add_command(command.name, command):
-                raise CogError(f"i failed to load '{command.name}' command.")
+        if not self.context.add_command(root.name, root):
+            raise CogError(f"i failed to load '{root.name}' command.")
 
     async def _reply(self, message: discord.Message, text: str) -> discord.Message:
         return await message.reply(
@@ -425,7 +462,7 @@ class FfmpegCog(Cog):
         if args.unknown:
             raise CogError(
                 f"didn't get {', '.join(args.unknown)} - usage: "
-                f"`>{CONVERT_NAME} [url] [format] [kbps] [opts]` "
+                f"`>{ROOT_NAME} {CONVERT_NAME} [url] [format] [kbps] [opts]` "
                 f"(formats: {', '.join(FORMATS)}) or attach / reply to a file.",
                 is_user_error=True,
             )
@@ -434,7 +471,7 @@ class FfmpegCog(Cog):
         if not url:
             raise CogError(
                 "nothing to convert - attach a file, reply to one, or put a "
-                f"url in the command. usage: `>{CONVERT_NAME} mp3 320`.",
+                f"url in the command. usage: `>{ROOT_NAME} {CONVERT_NAME} mp3 320`.",
                 is_user_error=True,
             )
         fmt = args.format or "mp3"
@@ -455,13 +492,13 @@ class FfmpegCog(Cog):
         if args.start is None or args.end is None or args.end <= args.start:
             raise CogError(
                 "i need two times first. seconds or m:ss or h:mm:ss - usage: "
-                f"`>{TRIM_NAME} 1:30 2:05 [url] [format] [opts]`.",
+                f"`>{ROOT_NAME} {TRIM_NAME} 1:30 2:05 [url] [format] [opts]`.",
                 is_user_error=True,
             )
         if args.unknown:
             raise CogError(
                 f"didn't get {', '.join(args.unknown)} - usage: "
-                f"`>{TRIM_NAME} <start> <end> [url] [format] [opts]`.",
+                f"`>{ROOT_NAME} {TRIM_NAME} <start> <end> [url] [format] [opts]`.",
                 is_user_error=True,
             )
         _validate_opts(args)
@@ -469,7 +506,7 @@ class FfmpegCog(Cog):
         if not url:
             raise CogError(
                 "nothing to trim - attach a file or reply to one or put a url "
-                f"in the command. usage: `>{TRIM_NAME} 0:10 0:25`.",
+                f"in the command. usage: `>{ROOT_NAME} {TRIM_NAME} 0:10 0:25`.",
                 is_user_error=True,
             )
         fmt = args.format or "copy"

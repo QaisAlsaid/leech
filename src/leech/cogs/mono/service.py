@@ -243,8 +243,15 @@ class MonoService:
         params = {"artist": artist, "track": track, "prefer": prefer}
         if album:
             params["album"] = album
-        if duration and int(duration) > 0:
-            params["duration"] = int(duration) // 1000
+        # duration comes in as milliseconds (mono's track data). convert to
+        # seconds and only send it when it's >= 1s: the hub rejects duration=0
+        # with a 422, and flooring ms<1000 to 0 used to trigger exactly that.
+        try:
+            secs = int(duration) // 1000 if duration else 0
+        except (TypeError, ValueError):
+            secs = 0
+        if secs >= 1:
+            params["duration"] = secs
         data = await self._api("GET", "/api/lyrics/get", params=params)
         return dict(data.get("data") or {})
 

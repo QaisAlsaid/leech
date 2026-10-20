@@ -70,6 +70,7 @@ class AiCog(Cog):
             turn_deadline=config.ai_turn_deadline,
             window_limit=config.ai_window_limit,
             window_budget=config.ai_window_budget,
+            backend="direct"
         )
         self.context.add_on_unload(self.shutdown)
         self.log = ActionLog()

@@ -30,8 +30,8 @@ ARTIST_CAP = 8
 VIEW_CAP = 60
 PROGRESS_MIN_SECS = 3.0
 POLL_SECS = 2.5
-TRACK_JOB_TIMEOUT = 420.0 
-ALBUM_JOB_TIMEOUT = 2400.0 
+TRACK_JOB_TIMEOUT = 420.0
+ALBUM_JOB_TIMEOUT = 2400.0
 
 
 def _leaf(name: str, description: str, handler, arguments=None) -> Command:
@@ -66,14 +66,14 @@ class MonoCog(Cog):
 
     async def load(self):
         root = Command(
-            name="monochrome",
+            name="mono",
             description="search and pull music off monochrome. (tracks, albums, artists).",
-            usage_example=">monochrome track search rebirth of an old nation",
+            usage_example=">mono track search rebirth of an old nation",
             help_content=(
                 "search runs straight from leech, and flac track links come "
                 " from monochrome itself. anything that needs "
                 "converting (mp3/wav/m4a/opus), or whole album zip, or "
-                "lyrics embedded in the tags runs as a job on the leech-hub.\nyou can set your format and lyrics with `>monochrome config`."
+                "lyrics embedded in the tags runs as a job on the leech-hub.\nyou can set your format and lyrics with `>mono config`."
             ),
             arguments=[],
             subcommands=(
@@ -323,7 +323,7 @@ class MonoCog(Cog):
             )
         if len(tracks) > LIST_CAP:
             lines.append(f"...(+{len(tracks) - LIST_CAP} more)")
-        lines.append("try `>monochrome track download <id or name>`")
+        lines.append("try `>mono track download <id or name>`")
         await self._send_lines(invocation.message, lines)
 
     async def track_download_handler(self, invocation: Invocation):
@@ -427,8 +427,8 @@ class MonoCog(Cog):
             )
         if len(releases) > LIST_CAP:
             lines.append(f"...(+{len(releases) - LIST_CAP} more)")
-        lines.append("try `>monochrome album download <id or name>` "
-                     "or peek with `>monochrome album view`")
+        lines.append("try `>mono album download <id or name>` "
+                     "or peek with `>mono album view`")
         await self._send_lines(invocation.message, lines)
 
     async def album_view_handler(self, invocation: Invocation):
@@ -458,7 +458,7 @@ class MonoCog(Cog):
             )
         if len(tracks) > VIEW_CAP:
             lines.append(f"...(+{len(tracks) - VIEW_CAP} more)")
-        lines.append("try `>monochrome album download <id or name>`")
+        lines.append("try `>mono album download <id or name>`")
         await self._send_lines(invocation.message, lines)
 
     async def album_download_handler(self, invocation: Invocation):
@@ -619,7 +619,7 @@ class MonoCog(Cog):
 
 
     async def status_handler(self, invocation: Invocation):
-        lines = ["monochrome:"]
+        lines = ["mono:"]
         alive, detail = await self.mono.probe()
         lines.append(
             f"search: {'direct ok (' + detail + ')' if alive else 'down (' + detail + ')'}"
