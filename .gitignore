@@ -222,7 +222,3 @@ __marimo__/
 persistent/
 persistent_back/
 leech.log*
-
-# wip not for this release
-src/leech/cogs/ffmpeg/
-src/leech/cogs/mono/
