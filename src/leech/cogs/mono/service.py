@@ -26,9 +26,10 @@ QUALITIES = ("flac", "320", "256", "192", "128", "96", "64", "wav", "m4a",
              "opus", "copy")
 LYRICS_MODES = ("off", "embed", "sidecar")
 LYRICS_PREFERS = ("synced", "plain")
-CONFIG_KEYS = ("quality", "lyrics_mode", "lyrics_prefer")
+ZIP_MODES = ("on", "off")
+CONFIG_KEYS = ("quality", "lyrics_mode", "lyrics_prefer", "album_zip")
 DEFAULT_CONFIG = {"quality": "flac", "lyrics_mode": "sidecar",
-                  "lyrics_prefer": "synced"}
+                  "lyrics_prefer": "synced", "album_zip": "on"}
 
 
 class MonoError(BaseError):
@@ -209,11 +210,17 @@ class MonoService:
         return str(data["job"])
 
     async def submit_album(self, release: dict, quality: str,
-                           lyrics: Optional[dict] = None) -> str:
+                           lyrics: Optional[dict] = None,
+                           zip_enabled: bool = True) -> str:
+        # zip=False asks the runner for loose files instead: every track
+        # gets uploaded on its own and the result carries a `files` list.
+        # needs the hub's v4 album patch; an unpatched hub just ignores
+        # the field and keeps zipping (api-compatible either way).
         data = await self._api("POST", "/api/mono/album", body={
             "id": release["id"],
             "quality": quality,
             "lyrics": lyrics or {"mode": "off", "prefer": "synced"},
+            "zip": bool(zip_enabled),
             "meta": {
                 "title": release.get("title"),
                 "artists": release.get("artists") or [],
@@ -334,6 +341,11 @@ class MonoService:
             )
         if key == "lyrics_prefer" and text not in LYRICS_PREFERS:
             raise MonoError("lyrics-prefer must be synced or plain.")
+        if key == "album_zip":
+            text = _norm_zip(value)
+            if text not in ZIP_MODES:
+                raise MonoError("zip must be on or off - `>mono config zip off` "
+                                "gets you loose files instead of an album zip.")
         entry = self._users.setdefault(int(user_id), {})
         entry[key] = text
         self._persist()
@@ -358,6 +370,11 @@ class MonoService:
             else DEFAULT_CONFIG["lyrics_prefer"],
         }
 
+    def album_zip(self, user_id: int) -> bool:
+        """per-user: zip the album (True, default) or loose files (False)."""
+        value = str(self.config(user_id).get("album_zip")
+                    or DEFAULT_CONFIG["album_zip"]).lower()
+        return _norm_zip(value) != "off"
 
     def _load(self) -> None:
         self._store.parent.mkdir(parents=True, exist_ok=True)
@@ -380,4 +397,11 @@ class MonoService:
         tmp = self._store.with_suffix(".json.temp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, self._store)
+
+
+def _norm_zip(value) -> str:
+    """on/off with a few friendly aliases folded in."""
+    text = str(value or "").strip().lower()
+    return {"true": "on", "yes": "on", "zip": "on", "1": "on",
+            "false": "off", "no": "off", "loose": "off", "0": "off"}.get(text, text)
 

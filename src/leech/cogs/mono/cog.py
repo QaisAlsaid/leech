@@ -73,7 +73,8 @@ class MonoCog(Cog):
                 "search runs straight from leech, and flac track links come "
                 " from monochrome itself. anything that needs "
                 "converting (mp3/wav/m4a/opus), or whole album zip, or "
-                "lyrics embedded in the tags runs as a job on the leech-hub.\nyou can set your format and lyrics with `>mono config`."
+                "lyrics embedded in the tags runs as a job on the leech-hub."
+                "\nyou can set your format, lyrics and album zip with `>mono config`."
             ),
             arguments=[],
             subcommands=(
@@ -226,6 +227,19 @@ class MonoCog(Cog):
                             name="value",
                             description="'synced' or 'plain'.",
                             usage_example="value=synced",
+                            type=TypesRegistry.require(Types.STR),
+                            required=True,
+                        )],
+                    ),
+                    "zip": _leaf(
+                        "zip",
+                        "album downloads: one zip, or loose files.",
+                        self.config_zip_handler,
+                        [Argument(
+                            name="value",
+                            description="'on' (one zip, default) or 'off' "
+                                        "(every track as its own link).",
+                            usage_example="value=off",
                             type=TypesRegistry.require(Types.STR),
                             required=True,
                         )],
@@ -466,20 +480,29 @@ class MonoCog(Cog):
         user = invocation.message.author.id
         quality = self.mono.quality(user)
         lyrics_cfg = self.mono.lyrics_cfg(user)
+        zip_on = self.mono.album_zip(user)
         release = await self.mono.find_release(query)
         if release is None:
             await self._reply(invocation.message, f"no album matched {query!r}.")
             return
         self.mono.require_server()
         title = release.get("title") or f"album {release['id']}"
-        note = f"zipping {title} ({quality_label(quality)})"
-        job_id = await self.mono.submit_album(release, quality, lyrics_cfg)
+        note = (f"zipping {title} ({quality_label(quality)})" if zip_on else
+                f"pulling {title} loose ({quality_label(quality)})")
+        job_id = await self.mono.submit_album(release, quality, lyrics_cfg,
+                                              zip_enabled=zip_on)
         result, status_msg = await self._run_job(invocation.message, job_id, note,
                                                  ALBUM_JOB_TIMEOUT)
-        await self._finish(status_msg, self._album_final(release, result, lyrics_cfg))
+        head, extra = self._album_final(release, result, lyrics_cfg)
+        await self._finish(status_msg, head)
+        if extra:
+            await self._send_lines(invocation.message, extra)
 
     def _album_final(self, release: dict, result: dict,
-                     lyrics_cfg: dict | None = None) -> str:
+                     lyrics_cfg: dict | None = None) -> "tuple[str, list[str]]":
+        """-> (head message, extra lines). v4: the runner can now come back
+        with loose files (result.files) and/or a list of tracks it skipped
+        after retries (result.failed) - neither kills the job."""
         title = result.get("title") or release.get("title") or "album"
         artists = ", ".join(result.get("artists") or release.get("artists") or []) or "?"
         head = f"**{title}** - {artists}"
@@ -492,29 +515,61 @@ class MonoCog(Cog):
         if result.get("size"):
             head += f" · {result['size'] / 1e6:.1f} mb"
         lines = [head]
-        url = result.get("url")
-        if not url and result.get("path"):
-            url = f"{self.mono.server_url}{result['path']}"
-        if url:
-            lines.append(f"[download zip]({url})")
-        lyrics_found = result.get("lyrics_found")
-        if isinstance(lyrics_found, int) and lyrics_cfg:
-            total = result.get("track_count") or lyrics_found
-            if lyrics_cfg.get("mode") == "embed":
-                lines.append(f"lyrics: embedded in {lyrics_found}/{total} files")
-            elif lyrics_cfg.get("mode") == "sidecar":
-                lines.append(f"lyrics: {lyrics_found}/{total} tracks came with "
-                             "a .lrc/.txt in the zip")
+
+        files = [f for f in (result.get("files") or [])
+                 if isinstance(f, dict) and f.get("url")]
+        if files:
+            # loose mode: every track (and its sidecar link) on its own
+            head += f" · {len(files)} files"
+            extra: list[str] = [f"files ({len(files)}):"]
+            for entry in files:
+                line = f"{str(entry.get('name') or 'file')} · [file]({entry['url']})"
+                if isinstance(entry.get("size"), int) and entry["size"]:
+                    line += f" · {entry['size'] / 1e6:.1f} mb"
+                if entry.get("lyrics_url"):
+                    line += f" · [lyrics]({entry['lyrics_url']})"
+                extra.append(line)
+        else:
+            extra = []
+            url = result.get("url")
+            if not url and result.get("path"):
+                url = f"{self.mono.server_url}{result['path']}"
+            if url:
+                lines.append(f"[download zip]({url})")
+            lyrics_found = result.get("lyrics_found")
+            if isinstance(lyrics_found, int) and lyrics_cfg:
+                total = result.get("track_count") or lyrics_found
+                if lyrics_cfg.get("mode") == "embed":
+                    lines.append(f"lyrics: embedded in {lyrics_found}/{total} files")
+                elif lyrics_cfg.get("mode") == "sidecar":
+                    lines.append(f"lyrics: {lyrics_found}/{total} tracks came with "
+                                 "a .lrc/.txt in the zip")
+
         artwork = result.get("artwork") or release.get("artwork")
         if artwork:
             lines.append(f"[artwork]({artwork})")
-        titles = [t.get("title") for t in (result.get("tracks") or []) if t.get("title")]
-        if titles:
-            shown = " · ".join(titles[:10])
-            if len(titles) > 10:
-                shown += f" · ...(+{len(titles) - 10})"
-            lines.append(f"tracks: {shown}")
-        return "\n".join(lines)
+
+        failed = [f for f in (result.get("failed") or []) if isinstance(f, dict)]
+        if failed:
+            shown = ", ".join(
+                f"{_fail_pos(f)} {_fail_title(f)} ({str(f.get('error') or 'failed')[:60]})"
+                for f in failed[:8])
+            note = f"⚠ {len(failed)} track{'s' if len(failed) != 1 else ''} failed " \
+                   f"(retried, then skipped): {shown}"
+            if len(failed) > 8:
+                note += f" …(+{len(failed) - 8} more)"
+            extra.append(note)
+        if result.get("zip_fallback"):
+            extra.append(f"note: {result['zip_fallback']}")
+
+        if not files:
+            titles = [t.get("title") for t in (result.get("tracks") or []) if t.get("title")]
+            if titles:
+                shown = " · ".join(titles[:10])
+                if len(titles) > 10:
+                    shown += f" · ...(+{len(titles) - 10})"
+                extra.append(f"tracks: {shown}")
+        return "\n".join(lines), extra
 
 
     async def artist_search_handler(self, invocation: Invocation):
@@ -560,12 +615,14 @@ class MonoCog(Cog):
             else "not set. jobs and lyrics off, only flac links will work"
         )
         quality = settings.get("quality", "flac")
+        zip_on = self.mono.album_zip(user_id)
         await self._reply(
             invocation.message,
             f"your monochrome config:\n"
             f"quality: {quality} ({quality_label(quality)})\n"
             f"lyrics: {settings.get('lyrics_mode')} "
             f"(prefer {settings.get('lyrics_prefer')})\n"
+            f"album zip: {'on (one zip)' if zip_on else 'off (loose files, one link per track)'}\n"
             f"hub: {server}",
         )
 
@@ -610,11 +667,23 @@ class MonoCog(Cog):
                else " (plain text)"),
         )
 
+    async def config_zip_handler(self, invocation: Invocation):
+        user_id = invocation.message.author.id
+        self.mono.set_config(user_id, "album_zip", invocation.arguments["value"])
+        zip_on = self.mono.album_zip(user_id)
+        await self._reply(
+            invocation.message,
+            ("album downloads come as one zip again." if zip_on else
+             "album downloads now come loose - every track gets its own "
+             "link (+ a lyrics link when sidecars are on)."),
+        )
+
     async def config_reset_handler(self, invocation: Invocation):
         self.mono.reset_config(invocation.message.author.id)
         await self._reply(
             invocation.message,
-            "config reset - quality flac, lyrics sidecar (prefer synced).",
+            "config reset - quality flac, lyrics sidecar (prefer synced), "
+            "album zip on.",
         )
 
 
@@ -642,9 +711,11 @@ class MonoCog(Cog):
             )
         quality = self.mono.quality(invocation.message.author.id)
         cfg = self.mono.lyrics_cfg(invocation.message.author.id)
+        zip_on = self.mono.album_zip(invocation.message.author.id)
         lines.append(
             f"your quality: {quality} ({quality_label(quality)}) · "
             f"lyrics: {cfg['mode']} (prefer {cfg['prefer']}) · "
+            f"album zip: {'on' if zip_on else 'off'} · "
             f"options: {', '.join(QUALITIES)}"
         )
         await self._reply(invocation.message, "\n".join(lines))
@@ -660,6 +731,17 @@ def _pick_text(lyrics: dict, prefer: str) -> "tuple[str | None, str]":
     if synced:
         return str(synced), "lrc"
     return None, ""
+
+
+def _fail_pos(entry: dict) -> str:
+    try:
+        return f"{int(entry.get('position') or 0):02d}."
+    except (TypeError, ValueError):
+        return "?."
+
+
+def _fail_title(entry: dict) -> str:
+    return str(entry.get("title") or "track")[:80]
 
 
 def create_cog(context: CogContext):
