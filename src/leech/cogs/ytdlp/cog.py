@@ -483,7 +483,6 @@ class YtdlpCog(Cog):
             pass
 
     def _cookie_payload(self) -> dict:
-        """cookie text for job payloads - {} when nothing is stored."""
         try:
             text = self.cookies.read()
         except Exception:
@@ -648,11 +647,11 @@ class YtdlpCog(Cog):
             cleared = self.cookies.clear()
             await self._reply(
                 invocation.message,
-                "cookie file forgotten 🗑" if cleared else
+                "cookie file forgotten." if cleared else
                 "no cookie file was stored anyway.")
             return
         if action:
-            raise CogError("the only cookies sub-action is `clear` - attach "
+            raise CogError("the only cookies sub-action is `clear`. attach "
                            "a cookies.txt to store one.",
                            is_user_error=True)
 
@@ -727,9 +726,7 @@ class YtdlpCog(Cog):
             await status.delete()
         except (discord.HTTPException, TypeError):
             pass
-        await invocation.message.reply(content=url, embed=embed,
-                                       mention_author=False,
-                                       allowed_mentions=discord.AllowedMentions.none())
+        await invocation.message.reply(content=url)
 
     @staticmethod
     def _fmt_duration(value) -> str:
