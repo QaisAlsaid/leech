@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 import asyncio
 import logging
 import os
@@ -81,7 +83,7 @@ def _validate_cookie_text(data: bytes) -> tuple[str, int, int]:
         raise CogError("cookies.txt must be plain text (utf-8).",
                        is_user_error=True)
     if "\x00" in text:
-        raise CogError("that file has null bytes in it. not a cookies.txt.",
+        raise CogError("that file has null bytes in it - not a cookies.txt.",
                        is_user_error=True)
     lines = 0
     domains = set()
@@ -96,7 +98,7 @@ def _validate_cookie_text(data: bytes) -> tuple[str, int, int]:
         domains.add(fields[0].strip().lower())
     if not lines:
         raise CogError(
-            "no valid cookie lines found. netscape format is 7 columns "
+            "no valid cookie lines found - netscape format is 7 columns "
             "separated by TABs. export with a 'Get cookies.txt' extension.",
             is_user_error=True)
     if not any("youtube" in d or "google" in d or "yt" == d for d in domains):
@@ -179,7 +181,7 @@ class _HubLane:
         if resp.status_code != 200:
             try:
                 detail = str(resp.json()["error"])
-            except Exception: 
+            except Exception:  # noqa: BLE001
                 detail = resp.text[:200]
             raise _LaneFail("hub", f"hub answered {resp.status_code}: {detail}")
         try:
@@ -306,6 +308,24 @@ class _ColabLane:
         except json.JSONDecodeError:
             raise _LaneFail("colab", "the manager returned invalid json.")
 
+    async def wake(self, gpu: bool = False) -> dict:
+        """ask the manager to wake the kaggle kernel right now (v6)."""
+        response = await self._call(
+            "POST", "/api/wake", {"force": True, "gpu": gpu})
+        if response.status_code == 401:
+            raise _LaneFail("colab", "token rejected (LEECH_YT_TOKEN).")
+        if response.status_code >= 400:
+            try:
+                detail = str(response.json().get("detail") or
+                             response.json().get("error") or "?")
+            except Exception:  # noqa: BLE001
+                detail = f"manager said {response.status_code}."
+            raise _LaneFail("colab", detail)
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            raise _LaneFail("colab", "the manager returned invalid json.")
+
 
 _LANES = {
     "hub": lambda: _HubLane(),
@@ -356,16 +376,16 @@ class YtdlpCog(Cog):
             description="fetch a video/audio link - hub or colab, whichever works.",
             usage_example=">ytdlp https://youtu.be/YUqCwBa2iIk",
             help_content=(
-                "downloads it on whichever lane is alive - the gh runner "
-                "(hub) or the colab/kaggle worker - and the finished file "
+                "downloads it on whichever lane is alive - the "
+                "(hub) or the colab/kaggle worker. and the finished file "
                 "lands on the store chain. if the first lane fails it "
                 "retries on the other automatically; `provider=hub` or "
                 "`provider=colab` pins one. video defaults to 720p mp4, "
-                "audio=on gets mp3, quality= caps video height (144-2160), "
+                "audio=on gets only mp3, quality= caps video height (144-2160), "
                 "max_mb= is the size cap (default 200), start=/end= in "
                 "seconds or mm:ss cuts a clip. youtube blocking the runner? "
                 "attach a cookies.txt to `>ytdlp cookies` and it rides "
-                "every job. `>ytdlp queue` shows both "
+                "every job (burner account). `>ytdlp queue` shows both "
                 "lanes; `>ytdlp cookies clear` forgets the cookie file."
             ),
             arguments=[
@@ -426,7 +446,7 @@ class YtdlpCog(Cog):
                     usage_example=">ytdlp queue",
                     help_content=(
                         "asks both lanes how deep their queue is and who's "
-                        "alive. the hub's runner dispatch plus the "
+                        "alive - the hub's runner dispatch plus the "
                         "colab/kaggle workers checking into the manager. "
                         "whichever answers is the one your next download "
                         "will ride."
@@ -435,23 +455,49 @@ class YtdlpCog(Cog):
                     subcommands={},
                     binding=NativeBinding(handler=self.queue_handler),
                 ),
+                "wake": Command(
+                    name="wake",
+                    description="wake the kaggle kernel now (drains, then idles out).",
+                    usage_example=">ytdlp wake",
+                    help_content=(
+                        "forces a kaggle kernel push right now, skipping the "
+                        "manager's cooldown. the kernel boots (~2-5 min), "
+                        "drains the queue, idles 15 min, then kills itself "
+                        "so quota isn't wasted. `gpu=on` makes it a gpu "
+                        "kernel (tts-ready, burns the 30h/week gpu quota - "
+                        "the default is cpu, best for yt). automatic wakes "
+                        "happen anyway when jobs land with no worker alive; "
+                        "this is the manual way."
+                    ),
+                    arguments=[
+                        Argument(
+                            name="gpu",
+                            description="on = gpu kernel (tts).",
+                            usage_example="gpu=on",
+                            type=TypesRegistry.require(Types.BOOL),
+                            required=False,
+                        ),
+                    ],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.wake_handler),
+                ),
                 "cookies": Command(
                     name="cookies",
                     description="store a cookies.txt for youtube (attach it).",
                     usage_example=">ytdlp cookies",
                     help_content=(
                         "attach a netscape cookies.txt to this command and "
-                        "it gets stored for the bot. every future yt job "
+                        "it gets stored for the bot - every future yt job "
                         "carries it to the runner/colab so youtube stops "
                         "asking for a login. no attachment = status. "
                         "`>ytdlp cookies clear` forgets it. use a burner "
-                        "account: the file is a live login (keep private), and yt "
+                        "account: the file IS a live login, and yt "
                         "sometimes flags automation accounts."
                     ),
                     arguments=[
                         Argument(
                             name="action",
-                            description="clear. forget the stored cookies.",
+                            description="clear - forget the stored cookies.",
                             usage_example="clear",
                             type=TypesRegistry.require(Types.STR),
                             required=False,
@@ -459,8 +505,6 @@ class YtdlpCog(Cog):
                     ],
                     subcommands={},
                     binding=NativeBinding(handler=self.cookies_handler),
-                    is_public=False,
-                    ai_visible=False,
                     elevated=True
                 ),
             },
@@ -468,6 +512,7 @@ class YtdlpCog(Cog):
         )
         if not self.context.add_command(root.name, root):
             raise CogError(f"i failed to load '{root.name}' ytdlp command.")
+
 
     async def _reply(self, message: discord.Message, text: str) -> discord.Message:
         return await message.reply(
@@ -517,6 +562,7 @@ class YtdlpCog(Cog):
                     f"({job_id}) keeps running in the cloud)")
             await asyncio.sleep(POLL_SECS)
 
+    # ------------------------------------------------------------- handlers
 
     async def yt_handler(self, invocation: Invocation):
         url = str(invocation.arguments["url"]).strip()
@@ -529,7 +575,7 @@ class YtdlpCog(Cog):
                            is_user_error=True)
         order = _provider_order(forced)
         if not order:
-            raise YtError("no yt lane is configured - fix leech "
+            raise YtError("no yt lane is configured - ask qais to fix leech "
                           "(LEECH_HUB_* / LEECH_YT_*).")
 
         payload: dict[str, Any] = {"url": url}
@@ -628,10 +674,40 @@ class YtdlpCog(Cog):
                             + f" ({w.get('last_seen_ago', '?')}s ago)"
                             for w in workers[:4])
                     else:
-                        who = "none - start the colab/kaggle notebook"
+                        who = "none - start the colab notebook or >ytdlp wake"
                     lines.append(f"colab  queued: {page.get('queued', 0)}"
                                  f" · inflight: {page.get('inflight', 0)}"
                                  f" · workers: {who}")
+                    kaggle = page.get("kaggle") or {}
+                    if kaggle.get("configured"):
+                        bits = [f"kernel {kaggle.get('kernel') or '?'}"]
+                        last = kaggle.get("last_wake") or {}
+                        if last:
+                            try:
+                                age = int(time.time() - float(last.get("at") or 0))
+                            except (TypeError, ValueError):
+                                age = 0
+                            wake_bits = [f"last wake {max(age, 0) // 60}m ago"]
+                            if last.get("version"):
+                                wake_bits.append(f"v{last['version']}")
+                            wake_bits.append("gpu" if last.get("gpu") else "cpu")
+                            if last.get("error"):
+                                wake_bits.append(f"err: {str(last['error'])[:60]}")
+                            bits.append(" · ".join(wake_bits))
+                        else:
+                            bits.append("never woken")
+                        if kaggle.get("cooldown_left"):
+                            bits.append(f"cooldown {int(kaggle['cooldown_left'])}s")
+                        lines.append(f"kaggle {' · '.join(bits)}")
+                    elif kaggle:
+                        missing = ", ".join(kaggle.get("missing") or ["?"])
+                        lines.append(f"kaggle off (missing: {missing[:70]})")
+                    kworkers = [w for w in (page.get("workers") or [])
+                                if isinstance(w, dict)
+                                and str(w.get("id") or "").startswith("kaggle")]
+                    if kworkers:
+                        lines.append("        (a kaggle kernel is alive and "
+                                     "checking in right now)")
             except _LaneFail as exc:
                 lines.append(f"{name:6s}  unreachable - {exc.message[:100]}")
         cookie = self.cookies.stats()
@@ -641,17 +717,45 @@ class YtdlpCog(Cog):
         lines.append("```")
         await self._reply(invocation.message, "\n".join(lines))
 
+    async def wake_handler(self, invocation: Invocation):
+        lane = self.lanes.get("colab")
+        if lane is None:
+            raise CogError("wake needs the colab lane (LEECH_YT_URL / "
+                           "LEECH_YT_TOKEN on the bot).",
+                           is_user_error=True)
+        gpu = bool(invocation.arguments.get("gpu"))
+        await self._reply(invocation.message,
+                          f"waking kaggle ({'gpu' if gpu else 'cpu'}) - "
+                          "the kernel takes ~2-5 min to boot...")
+        try:
+            info = await lane.wake(gpu=gpu)
+        except _LaneFail as exc:
+            raise YtError(f"the wake failed - {exc.message}")
+        state = str(info.get("status") or "?")
+        if state == "pushed":
+            version = info.get("version") or "?"
+            await self._reply(
+                invocation.message,
+                f"kernel pushed (version {version}, "
+                f"{'gpu' if info.get('gpu') else 'cpu'}) - it will check in "
+                "as a worker within a few minutes. `>ytdlp queue` to watch.")
+            return
+        reason = str(info.get("reason") or info.get("error") or "?")
+        await self._reply(
+            invocation.message,
+            f"wake: {state} - {reason[:300]}")
+
     async def cookies_handler(self, invocation: Invocation):
         action = str(invocation.arguments.get("action") or "").strip().lower()
         if action == "clear":
             cleared = self.cookies.clear()
             await self._reply(
                 invocation.message,
-                "cookie file forgotten." if cleared else
+                "cookie file forgotten" if cleared else
                 "no cookie file was stored anyway.")
             return
         if action:
-            raise CogError("the only cookies sub-action is `clear`. attach "
+            raise CogError("the only cookies sub-action is `clear` - attach "
                            "a cookies.txt to store one.",
                            is_user_error=True)
 
@@ -663,8 +767,8 @@ class YtdlpCog(Cog):
                     invocation.message,
                     "no cookie file stored. attach a netscape cookies.txt "
                     "(export it with a 'Get cookies.txt' extension while "
-                    "logged in on a burner account) to this command to "
-                    "store one. it rides every yt job to both lanes.")
+                    "logged in on a BURNER account) to this command to "
+                    "store one - it rides every yt job to both lanes.")
             else:
                 await self._reply(
                     invocation.message,
@@ -687,46 +791,64 @@ class YtdlpCog(Cog):
         self.cookies.save(text)
         await self._reply(
             invocation.message,
-            f"cookies stored {lines} lines across {domains} domains. "
-            "every yt job carries them to hub and colab "
-            "reexport when downloads start failing again. burner account always.")
+            f"cookies stored {lines} lines across {domains} domains - "
+            "every yt job carries them youtube logins expire, so "
+            "re-export when downloads start failing again. (burner account).")
 
-    async def _deliver(self, invocation: Invocation, status: discord.Message,
-                       result: dict, lane_name: str):
-        url = str(result.get("url") or "")
-        if not url:
+    async def _deliver(self, invocation: Invocation, status: discord.Message, result: dict, lane_name: str):
+          url = str(result.get("url") or "")
+          if not url:
             await self._fail(status, "the lane finished but sent no link 😟")
             return
-        size = result.get("size_mb")
-        if size is None and result.get("size"):
+
+          size = result.get("size_mb")
+          if size is None and result.get("size"):
             try:
-                size = round(float(result["size"]) / 1e6, 1)
+              size = round(float(result["size"]) / 1e6, 1)
             except (TypeError, ValueError):
-                size = None
-        embed = discord.Embed(
-            title=str(result.get("title") or "download")[:250],
-            url=str(result.get("webpage_url") or url),
-            color=0x5865F2,
-        )
-        if result.get("uploader"):
-            embed.set_author(name=str(result["uploader"])[:100])
-        fields = [
-            ("file", f"{size if size is not None else '?'}mb · "
-                     f"{result.get('format') or ('mp3' if result.get('audio') else 'mp4')}"),
-            ("duration", self._fmt_duration(result.get("duration"))),
-        ]
-        for name, value in fields:
-            if value and value != "?":
-                embed.add_field(name=name, value=value, inline=True)
-        embed.set_footer(text=f"leech · yt · {lane_name}")
-        thumb = str(result.get("thumbnail") or "")
-        if thumb.startswith("https"):
-            embed.set_thumbnail(url=thumb)
-        try:
+              size = None
+
+          title = str(result.get("title") or "download")[:250]
+          webpage_url = str(result.get("webpage_url") or url)
+          uploader = str(result.get("uploader"))[:100] if result.get("uploader") else None
+
+          size_str = f"{size}mb" if size is not None else "?mb"
+          format_str = (
+            result.get("format") or ("mp3" if result.get("audio") else "mp4")
+          )
+          duration_str = self._fmt_duration(result.get("duration"))
+
+          lines = [f"**[{title}]({webpage_url})**"]
+
+          if uploader:
+            lines.append(f" {uploader}")
+
+          details = []
+          if size_str != "?mb":
+            details.append(size_str)
+          if format_str:
+            details.append(str(format_str))
+          if duration_str:
+            details.append(duration_str)
+
+          if details:
+            lines.append(" · ".join(details))
+
+          lines.append(f"leech · yt · {lane_name}")
+          lines.append(url)
+
+          message_text = "\n".join(lines)
+
+          try:
             await status.delete()
-        except (discord.HTTPException, TypeError):
+          except (discord.HTTPException, TypeError):
             pass
-        await invocation.message.reply(content=url)
+
+          await invocation.message.reply(
+            content=message_text,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+          )
 
     @staticmethod
     def _fmt_duration(value) -> str:

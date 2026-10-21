@@ -27,6 +27,7 @@ import leech.core.helpers.text.splitter as splitter
 REPLY_LIMIT = 1990
 LIST_CAP = 10
 ARTIST_CAP = 8
+FIND_CAP = 15
 VIEW_CAP = 60
 PROGRESS_MIN_SECS = 3.0
 POLL_SECS = 2.5
@@ -177,6 +178,18 @@ class MonoCog(Cog):
                             name="name",
                             description="the artist name.",
                             usage_example="name=opeth",
+                            type=TypesRegistry.require(Types.STR),
+                            required=True,
+                        )],
+                    ),
+                    "find": _leaf(
+                        "find",
+                        "search for artists - lists several matches.",
+                        self.artist_find_handler,
+                        [Argument(
+                            name="query",
+                            description="the artist name (or a fragment).",
+                            usage_example="query=pink floyd",
                             type=TypesRegistry.require(Types.STR),
                             required=True,
                         )],
@@ -500,9 +513,6 @@ class MonoCog(Cog):
 
     def _album_final(self, release: dict, result: dict,
                      lyrics_cfg: dict | None = None) -> "tuple[str, list[str]]":
-        """-> (head message, extra lines). v4: the runner can now come back
-        with loose files (result.files) and/or a list of tracks it skipped
-        after retries (result.failed) - neither kills the job."""
         title = result.get("title") or release.get("title") or "album"
         artists = ", ".join(result.get("artists") or release.get("artists") or []) or "?"
         head = f"**{title}** - {artists}"
@@ -519,7 +529,6 @@ class MonoCog(Cog):
         files = [f for f in (result.get("files") or [])
                  if isinstance(f, dict) and f.get("url")]
         if files:
-            # loose mode: every track (and its sidecar link) on its own
             head += f" · {len(files)} files"
             extra: list[str] = [f"files ({len(files)}):"]
             for entry in files:
@@ -554,10 +563,10 @@ class MonoCog(Cog):
             shown = ", ".join(
                 f"{_fail_pos(f)} {_fail_title(f)} ({str(f.get('error') or 'failed')[:60]})"
                 for f in failed[:8])
-            note = f"⚠ {len(failed)} track{'s' if len(failed) != 1 else ''} failed " \
+            note = f"{len(failed)} track{'s' if len(failed) != 1 else ''} failed " \
                    f"(retried, then skipped): {shown}"
             if len(failed) > 8:
-                note += f" …(+{len(failed) - 8} more)"
+                note += f" ...(+{len(failed) - 8} more)"
             extra.append(note)
         if result.get("zip_fallback"):
             extra.append(f"note: {result['zip_fallback']}")
@@ -604,6 +613,73 @@ class MonoCog(Cog):
             lines.append(f"…(+{len(tracks) - ARTIST_CAP} tracks)")
         if len(releases) > ARTIST_CAP:
             lines.append(f"…(+{len(releases) - ARTIST_CAP} albums)")
+        await self._send_lines(invocation.message, lines)
+
+
+    async def artist_find_handler(self, invocation: Invocation):
+        query = invocation.arguments["query"]
+        result = await self.mono.search(query)
+        rows: dict[str, dict] = {}
+
+        def bump(name: str, kind: str) -> None:
+            clean = str(name or "").strip()
+            key = clean.lower()
+            if not key or len(key) > 80:
+                return
+            row = rows.setdefault(
+                key, {"name": clean, "tracks": 0, "releases": 0})
+            row[kind] += 1
+
+        for track in result["tracks"]:
+            for name in track.get("artists") or []:
+                bump(name, "tracks")
+        for release in result["releases"]:
+            for name in release.get("artists") or []:
+                bump(name, "releases")
+
+        ranked = sorted(
+            rows.values(),
+            key=lambda r: (r["tracks"] + r["releases"], r["tracks"]),
+            reverse=True,
+        )
+        explicit = result["artists"]
+        by_name = {r["name"].lower(): r for r in ranked}
+        for artist in explicit:
+            key = str(artist.get("name") or "").strip().lower()
+            row = by_name.get(key)
+            if row is not None:
+                row["id"] = artist.get("id")
+                row["username"] = artist.get("username")
+            else:
+                ranked.insert(0, {"name": str(artist.get("name") or "?"),
+                                  "tracks": 0, "releases": 0,
+                                  "id": artist.get("id"),
+                                  "username": artist.get("username")})
+
+        if not ranked:
+            await self._reply(
+                invocation.message, f"no artist matched {query!r}.")
+            return
+
+        lines = [f"artists matching **{query}**:"]
+        for index, row in enumerate(ranked[:FIND_CAP], start=1):
+            parts = [f"{index}. **{row['name']}**"]
+            if row.get("username"):
+                parts.append(f"(@{row['username']})")
+            counts = []
+            if row["tracks"]:
+                counts.append(f"{row['tracks']} tracks")
+            if row["releases"]:
+                counts.append(f"{row['releases']} albums")
+            if counts:
+                parts.append(" · ".join(counts))
+            if row.get("id"):
+                parts.append(f"· `{row['id']}`")
+            lines.append(" ".join(parts))
+        if len(ranked) > FIND_CAP:
+            lines.append(f"...(+{len(ranked) - FIND_CAP} more)")
+        lines.append("view one with `>mono artist search <name>` "
+                     "(or `>mono album view <name>`).")
         await self._send_lines(invocation.message, lines)
 
 
