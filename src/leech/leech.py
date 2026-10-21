@@ -28,6 +28,9 @@ COGS = [
     "leech.cogs.png.cog",
     "leech.cogs.tts.cog",
     "leech.cogs.ytdlp.cog",
+    "leech.cogs.mono.cog",
+    "leech.cogs.lrc.cog",
+    "leech.cogs.ffmpeg.cog",
     "leech.cogs.ai.cog",  # always last
 ]
 

@@ -1,40 +1,54 @@
 from __future__ import annotations
-
 import asyncio
 import logging
 import os
 import re
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 import discord
 import httpx
+import json
 
-from leech.core.cog.cog import Cog, CogContext
+from leech.core.cog.cog import Cog
+from leech.core.cog.context import CogContext
 from leech.core.cog.error import CogError
-from leech.core.command.runtime import Command, Argument
-from leech.core.command.native.binding import NativeBinding
 from leech.core.command.mock.binding import MockBinding
+from leech.core.command.native.binding import NativeBinding
+from leech.core.command.runtime import Argument, Command
 from leech.core.command.invocation import Invocation
 from leech.core.parser.types.registry import Types, TypesRegistry
+from leech.core.error import BaseError
 
 _logger = logging.getLogger(__name__)
 
-MANAGER = (os.getenv("LEECH_YT_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
-TOKEN = (os.getenv("LEECH_YT_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or "").strip()
+HUB_URL = (os.getenv("LEECH_HUB_URL") or "").strip().rstrip("/")
+HUB_TOKEN = (os.getenv("LEECH_HUB_TOKEN") or "").strip()
+COLAB_URL = (os.getenv("LEECH_YT_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
+COLAB_TOKEN = (os.getenv("LEECH_YT_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or "").strip()
+PROVIDERS_ENV = (os.getenv("LEECH_YT_PROVIDERS") or "hub,colab").strip()
 TIMEOUT = float(os.getenv("LEECH_YT_TIMEOUT", "1800") or 1800)
 MAX_MB = float(os.getenv("LEECH_YT_MAX_MB", "200") or 200)
-POLL_SECS = 4.0
-MIN_UPDATE_SECS = 8.0 
+POLL_SECS = 2.5
+PROGRESS_MIN_SECS = 3.0
+REPLY_LIMIT = 1990
+COOKIE_PATH = Path("persistent/v1/ytdlp/cookies.txt")
+COOKIE_MAX_BYTES = 200_000
 
 _URL_RE = re.compile(r"^https?://\S+$")
-_TRUTHY = {"1", "true", "yes", "on"}
+_PROVIDER_RE = re.compile(r"^(hub|colab)$", re.IGNORECASE)
 
 
-class _ManagerError(Exception):
-    def __init__(self, kind: str, message: str):
+class YtError(BaseError):
+    def __init__(self, message: str, is_user_error: bool = False):
+        super().__init__(message=message, is_user_error=is_user_error)
+
+
+class _LaneFail(Exception):
+    def __init__(self, lane: str, message: str):
         super().__init__(message)
-        self.kind = kind  # offline | auth | bad | server
+        self.lane = lane
         self.message = message
 
 
@@ -54,111 +68,474 @@ def _parse_seconds(raw: str) -> float:
     return seconds
 
 
+
+def _validate_cookie_text(data: bytes) -> tuple[str, int, int]:
+    if len(data) > COOKIE_MAX_BYTES:
+        raise CogError(
+            f"that file is {len(data) // 1000}kb - the cap is "
+            f"{COOKIE_MAX_BYTES // 1000}kb. export fewer sites (youtube only).",
+            is_user_error=True)
+    try:
+        text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        raise CogError("cookies.txt must be plain text (utf-8).",
+                       is_user_error=True)
+    if "\x00" in text:
+        raise CogError("that file has null bytes in it. not a cookies.txt.",
+                       is_user_error=True)
+    lines = 0
+    domains = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 7:
+            continue
+        lines += 1
+        domains.add(fields[0].strip().lower())
+    if not lines:
+        raise CogError(
+            "no valid cookie lines found. netscape format is 7 columns "
+            "separated by TABs. export with a 'Get cookies.txt' extension.",
+            is_user_error=True)
+    if not any("youtube" in d or "google" in d or "yt" == d for d in domains):
+        _logger.warning("cookie file has no youtube/google rows (domains=%d)",
+                        len(domains))
+    if not text.endswith("\n"):
+        text += "\n"
+    return text, lines, len(domains)
+
+
+class _CookieStore:
+    def __init__(self, path: Path = COOKIE_PATH):
+        self._path = path
+
+    def read(self) -> Optional[str]:
+        try:
+            text = self._path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        text = text.strip()
+        return text or None
+
+    def save(self, text: str) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".txt.temp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            raise YtError(f"couldn't save the cookie file: {exc}")
+
+    def clear(self) -> bool:
+        existed = self._path.exists()
+        try:
+            self._path.unlink(missing_ok=True)
+            self._path.with_suffix(".txt.temp").unlink(missing_ok=True)
+        except OSError:
+            return existed
+        return existed
+
+    def stats(self) -> Optional[dict]:
+        try:
+            stat = self._path.stat()
+            text = self.read()
+        except OSError:
+            return None
+        if not text:
+            return None
+        lines = sum(1 for line in text.splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                    and line.count("\t") >= 6)
+        return {"size": stat.st_size, "lines": lines,
+                "age_s": max(0, int(time.time() - stat.st_mtime))}
+
+
+class _HubLane:
+    name = "hub"
+    pretty = "hub (gh runner)"
+
+    def __init__(self):
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def _api(self, method: str, path: str, body: dict | None = None) -> dict:
+        try:
+            if method == "GET":
+                resp = await self._http.get(
+                    HUB_URL + path, headers={"x-leech-token": HUB_TOKEN})
+            else:
+                resp = await self._http.post(
+                    HUB_URL + path, json=body,
+                    headers={"x-leech-token": HUB_TOKEN})
+        except httpx.HTTPError as exc:
+            raise _LaneFail("hub", f"leech-hub unreachable ({type(exc).__name__})")
+        if resp.status_code == 401:
+            raise _LaneFail("hub", "the hub rejected the token "
+                                   "(LEECH_HUB_TOKEN).")
+        if resp.status_code != 200:
+            try:
+                detail = str(resp.json()["error"])
+            except Exception: 
+                detail = resp.text[:200]
+            raise _LaneFail("hub", f"hub answered {resp.status_code}: {detail}")
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            raise _LaneFail("hub", "the hub returned invalid json.")
+        if not data.get("ok"):
+            raise _LaneFail("hub", str(data.get("error") or "unknown hub error"))
+        return data
+
+    async def submit(self, payload: dict) -> str:
+        data = await self._api("POST", "/api/jobs",
+                               body={"kind": "yt", "payload": payload})
+        return str(data["job"])
+
+    async def view(self, job_id: str) -> dict:
+        data = await self._api("GET", f"/api/jobs/{job_id}")
+        job = dict(data.get("job") or {})
+        progress = job.get("progress") or {}
+        state = str(job.get("status") or "queued")
+        if state == "queued":
+            label = "queued"
+        elif state == "inflight":
+            stage = str(progress.get("stage") or "working")
+            total = progress.get("total")
+            if isinstance(total, int) and total > 0:
+                label = f"{stage} {progress.get('done', 0)}/{total}"
+            else:
+                label = stage
+            if progress.get("note"):
+                label += f": {progress['note']}"
+        else:
+            label = state
+        return {"status": state, "label": label,
+                "result": job.get("result") or {},
+                "error": job.get("error")}
+
+    async def health(self) -> dict:
+        return await self._api("GET", "/api/health")
+
+
+class _ColabLane:
+    name = "colab"
+    pretty = "colab (manager)"
+
+    def __init__(self):
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    def _headers(self) -> dict:
+        headers = {"Accept": "application/json"}
+        if COLAB_TOKEN:
+            headers["x-leech-token"] = COLAB_TOKEN
+        return headers
+
+    async def _call(self, method: str, path: str,
+                    json_body: dict | None = None) -> httpx.Response:
+        try:
+            if method == "GET":
+                return await self._http.get(COLAB_URL + path,
+                                            headers=self._headers())
+            return await self._http.post(COLAB_URL + path, json=json_body,
+                                         headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise _LaneFail("colab", f"the manager is unreachable "
+                                     f"({type(exc).__name__}) - is the colab "
+                                     f"notebook running?")
+
+    async def submit(self, payload: dict) -> str:
+        response = await self._call("POST", "/api/jobs",
+                                    {"kind": "yt", "payload": payload})
+        if response.status_code == 401:
+            raise _LaneFail("colab", "token rejected. LEECH_YT_TOKEN vs the "
+                                     "manager's TOKEN.")
+        if response.status_code == 400:
+            try:
+                detail = str(response.json().get("detail") or "?")
+            except Exception: 
+                detail = "?"
+            raise _LaneFail("colab", detail)
+        if response.status_code >= 400:
+            raise _LaneFail("colab", f"manager said {response.status_code}.")
+        try:
+            job_id = str(response.json().get("id") or "")
+        except json.JSONDecodeError:
+            raise _LaneFail("colab", "the manager returned invalid json.")
+        if not job_id:
+            raise _LaneFail("colab", "the manager didn't give the job an id.")
+        return job_id
+
+    async def view(self, job_id: str) -> dict:
+        response = await self._call("GET", f"/api/jobs/{job_id}")
+        if response.status_code == 404:
+            raise _LaneFail("colab", "job gone - maybe it expired "
+                                     "(older than a day).")
+        if response.status_code >= 400:
+            raise _LaneFail("colab", f"manager said {response.status_code}.")
+        try:
+            view = response.json()
+        except json.JSONDecodeError:
+            raise _LaneFail("colab", "the manager returned invalid json.")
+        state = str(view.get("status") or "queued")
+        if state == "queued":
+            position = view.get("position")
+            label = f"queued (position {position})" if position else "queued"
+        elif state == "inflight" and view.get("stage"):
+            label = str(view["stage"])
+        else:
+            label = state
+        return {"status": state, "label": label,
+                "result": view.get("result") or {},
+                "error": view.get("error")}
+
+    async def health(self) -> dict:
+        response = await self._call("GET", "/api/status")
+        if response.status_code == 401:
+            raise _LaneFail("colab", "token rejected (LEECH_YT_TOKEN).")
+        if response.status_code >= 400:
+            raise _LaneFail("colab", f"manager said {response.status_code}.")
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            raise _LaneFail("colab", "the manager returned invalid json.")
+
+
+_LANES = {
+    "hub": lambda: _HubLane(),
+    "colab": lambda: _ColabLane(),
+}
+
+
+def _lane_env_ok(name: str) -> bool:
+    if name == "hub":
+        return bool(HUB_URL and HUB_TOKEN)
+    return bool(COLAB_URL and COLAB_TOKEN)
+
+
+def _provider_order(forced: Optional[str]) -> list[str]:
+    if forced:
+        return [forced]
+    order = []
+    for name in PROVIDERS_ENV.split(","):
+        name = name.strip().lower()
+        if name in _LANES and name not in order:
+            order.append(name)
+    return [name for name in order if _lane_env_ok(name)] or \
+           [name for name in ("hub", "colab") if _lane_env_ok(name)]
+
+
 class YtdlpCog(Cog):
     def __init__(self, context: CogContext):
         super().__init__(context=context)
+        if not (_lane_env_ok("hub") or _lane_env_ok("colab")):
+            _logger.warning(
+                "ytdlp cog: no lane configured (LEECH_HUB_URL/TOKEN for the "
+                "hub, LEECH_YT_URL/TOKEN for colab). not loading"
+            )
+            return
         self.context.add_on_load(self.load)
+        self.context.add_on_unload(self.shutdown)
+        self.lanes = {name: factory()
+                      for name, factory in _LANES.items() if _lane_env_ok(name)}
+        self.cookies = _CookieStore()
+
+    async def shutdown(self) -> None:
+        for lane in getattr(self, "lanes", {}).values():
+            await lane.aclose()
 
     async def load(self):
-        for name, command in {
-            **self.get_ytdlp(),
-        }.items():
-            if not self.context.add_command(name, command):
-                raise CogError(f"i failed to load '{name}' ytdlp command.")
-        if not MANAGER:
-            _logger.warning("ytdlp: LEECH_YT_URL/LEECH_TTS_URL not set. `>ytdlp` won't work.")
-
-    def get_ytdlp(self) -> dict[str, Command]:
-        return {
-            "ytdlp": Command(
-                name="ytdlp",
-                description="fetch a video/audio link.",
-                usage_example=">ytdlp https://youtu.be/YUqCwBa2iIk",
-                help_content=(
-                    "downloads + converts it and the finished file lands on "
-                    "a free file host (x0.at or similar - the worker tries "
-                    "several). you get a direct link, big files included (up "
-                    "to 200mb). video defaults to 720p mp4. audio=1 gets mp3. "
-                    "start=/end= creates a clip (seconds or mm:ss). if no worker "
-                    "session is alive the job just waits in the queue until a valid worker picks it. `>ytdlp queue`"
-                    "shows if there is anything in queue."
+        root = Command(
+            name="ytdlp",
+            description="fetch a video/audio link - hub or colab, whichever works.",
+            usage_example=">ytdlp https://youtu.be/YUqCwBa2iIk",
+            help_content=(
+                "downloads it on whichever lane is alive - the gh runner "
+                "(hub) or the colab/kaggle worker - and the finished file "
+                "lands on the store chain. if the first lane fails it "
+                "retries on the other automatically; `provider=hub` or "
+                "`provider=colab` pins one. video defaults to 720p mp4, "
+                "audio=on gets mp3, quality= caps video height (144-2160), "
+                "max_mb= is the size cap (default 200), start=/end= in "
+                "seconds or mm:ss cuts a clip. youtube blocking the runner? "
+                "attach a cookies.txt to `>ytdlp cookies` and it rides "
+                "every job. `>ytdlp queue` shows both "
+                "lanes; `>ytdlp cookies clear` forgets the cookie file."
+            ),
+            arguments=[
+                Argument(
+                    name="url",
+                    description="the media link.",
+                    usage_example="https://youtu.be/pqMrFVuF-nc",
+                    type=TypesRegistry.require(Types.STR),
+                    required=True,
                 ),
-                arguments=[
-                    Argument(
-                        name="url",
-                        description="the media link.",
-                        usage_example="https://youtu.be/pqMrFVuF-nc",
-                        type=TypesRegistry.require(Types.STR),
-                        required=True,
-                    ),
-                    Argument(
-                        name="audio",
-                        description="on = mp3 instead of video.",
-                        usage_example="audio=on",
-                        type=TypesRegistry.require(Types.BOOL),
-                        required=False,
-                    ),
-                    Argument(
-                        name="quality",
-                        description="max video height (default 720).",
-                        usage_example="quality=1080",
-                        type=TypesRegistry.require(Types.STR),
-                        required=False,
-                    ),
-                    Argument(
-                        name="max_mb",
-                        description="size cap before reencoding (default 200).",
-                        usage_example="max_mb=50",
-                        type=TypesRegistry.require(Types.INT),
-                        required=False,
-                    ),
-                    Argument(
-                        name="start",
-                        description="clip start (seconds or mm:ss).",
-                        usage_example="start=1:67",
-                        type=TypesRegistry.require(Types.STR),
-                        required=False,
-                    ),
-                    Argument(
-                        name="end",
-                        description="clip end (seconds or mm:ss).",
-                        usage_example="end=1:67",
-                        type=TypesRegistry.require(Types.STR),
-                        required=False,
-                    ),
-                ],
-                subcommands={**self.get_ytdlp_queue()},
-                binding=NativeBinding(handler=self.yt_handler),
-            )
-        }
-
-    def get_ytdlp_queue(self) -> dict[str, Command]:
-        return {
-            "queue": Command(
-                name="queue",
-                description="cloud queue + worker status.",
-                usage_example=">ytdlp queue",
-                help_content=(
-                    "asks the manager: how many jobs queued, is a worker "
-                    "session alive, which engine it runs. if no worker is "
-                    "listed, activate cloud first."
+                Argument(
+                    name="audio",
+                    description="on = mp3 instead of video.",
+                    usage_example="audio=on",
+                    type=TypesRegistry.require(Types.BOOL),
+                    required=False,
                 ),
-                arguments=[],
-                subcommands={},
-                binding=NativeBinding(handler=self.ytq_handler),
-            )
-        }
+                Argument(
+                    name="quality",
+                    description="max video height (default 720).",
+                    usage_example="quality=1080",
+                    type=TypesRegistry.require(Types.STR),
+                    required=False,
+                ),
+                Argument(
+                    name="max_mb",
+                    description="size cap (default 200).",
+                    usage_example="max_mb=50",
+                    type=TypesRegistry.require(Types.INT),
+                    required=False,
+                ),
+                Argument(
+                    name="start",
+                    description="clip start (seconds or mm:ss).",
+                    usage_example="start=1:67",
+                    type=TypesRegistry.require(Types.STR),
+                    required=False,
+                ),
+                Argument(
+                    name="end",
+                    description="clip end (seconds or mm:ss).",
+                    usage_example="end=1:67",
+                    type=TypesRegistry.require(Types.STR),
+                    required=False,
+                ),
+                Argument(
+                    name="provider",
+                    description="pin the lane: hub or colab.",
+                    usage_example="provider=colab",
+                    type=TypesRegistry.require(Types.STR),
+                    required=False,
+                ),
+            ],
+            subcommands={
+                "queue": Command(
+                    name="queue",
+                    description="both lanes: queue + workers.",
+                    usage_example=">ytdlp queue",
+                    help_content=(
+                        "asks both lanes how deep their queue is and who's "
+                        "alive. the hub's runner dispatch plus the "
+                        "colab/kaggle workers checking into the manager. "
+                        "whichever answers is the one your next download "
+                        "will ride."
+                    ),
+                    arguments=[],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.queue_handler),
+                ),
+                "cookies": Command(
+                    name="cookies",
+                    description="store a cookies.txt for youtube (attach it).",
+                    usage_example=">ytdlp cookies",
+                    help_content=(
+                        "attach a netscape cookies.txt to this command and "
+                        "it gets stored for the bot. every future yt job "
+                        "carries it to the runner/colab so youtube stops "
+                        "asking for a login. no attachment = status. "
+                        "`>ytdlp cookies clear` forgets it. use a burner "
+                        "account: the file is a live login (keep private), and yt "
+                        "sometimes flags automation accounts."
+                    ),
+                    arguments=[
+                        Argument(
+                            name="action",
+                            description="clear. forget the stored cookies.",
+                            usage_example="clear",
+                            type=TypesRegistry.require(Types.STR),
+                            required=False,
+                        ),
+                    ],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.cookies_handler),
+                    is_public=False,
+                    ai_visible=False,
+                    elevated=True
+                ),
+            },
+            binding=NativeBinding(handler=self.yt_handler),
+        )
+        if not self.context.add_command(root.name, root):
+            raise CogError(f"i failed to load '{root.name}' ytdlp command.")
+
+    async def _reply(self, message: discord.Message, text: str) -> discord.Message:
+        return await message.reply(
+            text[:REPLY_LIMIT],
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _edit(self, status: discord.Message, text: str) -> None:
+        try:
+            await status.edit(content=text[:REPLY_LIMIT])
+        except discord.HTTPException:
+            pass
+
+    def _cookie_payload(self) -> dict:
+        try:
+            text = self.cookies.read()
+        except Exception:
+            text = None
+        return {"cookies": text} if text else {}
+
+    async def _await_lane(self, lane, job_id: str, note: str,
+                          status: discord.Message) -> dict:
+        shown = ""
+        last_edit = 0.0
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            view = await lane.view(job_id)
+            state = view["status"]
+            if state == "done":
+                result = dict(view.get("result") or {})
+                if not result:
+                    raise _LaneFail(lane.name, "finished but sent no link 😟")
+                return result
+            if state == "error":
+                raise _LaneFail(lane.name, str(view.get("error") or
+                                               "the job failed on the lane."))
+            label = f"{note} - {lane.name}: {view['label']}"
+            now = time.monotonic()
+            if label != shown and now - last_edit >= PROGRESS_MIN_SECS:
+                await self._edit(status, label)
+                shown, last_edit = label, now
+            if now >= deadline:
+                raise _LaneFail(
+                    lane.name,
+                    f"still working after {TIMEOUT / 60:.0f}min (the job "
+                    f"({job_id}) keeps running in the cloud)")
+            await asyncio.sleep(POLL_SECS)
+
 
     async def yt_handler(self, invocation: Invocation):
-        self._require_manager()
         url = str(invocation.arguments["url"]).strip()
         if not _URL_RE.match(url):
-            raise CogError("invalid youtube link 😁", is_user_error=True)
+            raise CogError("invalid link 😁", is_user_error=True)
+
+        forced = str(invocation.arguments.get("provider") or "").strip().lower()
+        if forced and not _PROVIDER_RE.match(forced):
+            raise CogError("provider must be hub or colab.",
+                           is_user_error=True)
+        order = _provider_order(forced)
+        if not order:
+            raise YtError("no yt lane is configured - fix leech "
+                          "(LEECH_HUB_* / LEECH_YT_*).")
 
         payload: dict[str, Any] = {"url": url}
         audio = invocation.arguments.get("audio") or None
         if audio:
-            payload["audio"] = audio
+            payload["audio"] = True
         quality = invocation.arguments.get("quality") or None
         if quality:
             try:
@@ -167,160 +544,165 @@ class YtdlpCog(Cog):
                 raise CogError("quality must be a number like 720.",
                                is_user_error=True)
             if not 144 <= quality <= 2160:
-                raise CogError("quality must be between 144 and 2160 pixels.", is_user_error=True)
+                raise CogError(
+                    "quality must be between 144 and 2160 pixels.",
+                    is_user_error=True)
             payload["quality"] = quality
         max_mb = invocation.arguments.get("max_mb") or None
         if max_mb:
+            try:
+                max_mb = float(max_mb)
+            except (TypeError, ValueError):
+                raise CogError("max_mb must be a number like 50.",
+                               is_user_error=True)
+            if max_mb < 1:
+                raise CogError("max_mb must be at least 1mb.",
+                               is_user_error=True)
             payload["max_mb"] = min(max_mb, MAX_MB)
-            if payload["max_mb"] < 1:
-                raise CogError("max_mb must be at least 1mb.", is_user_error=True)
         for name in ("start", "end"):
             raw = str(invocation.arguments.get(name) or "").strip()
             if raw:
                 payload[name] = _parse_seconds(raw)
         if "start" in payload and "end" in payload \
                 and payload["end"] <= payload["start"]:
-            raise CogError("invalid clip 'end' has to be after 'start'.", is_user_error=True)
-
-        job = await self._enqueue("yt", payload)
-        status = await invocation.message.reply(
-            f"yt: queued (position {job['position']})...", mention_author=False
-        )
-        result = await self._await_job(status, job["id"])
-        if result is None:
-            return
-        await self._deliver(invocation, status, result)
-
-    async def ytq_handler(self, invocation: Invocation):
-        self._require_manager()
-        try:
-            data = await self._status_page()
-        except _ManagerError as e:
-            await invocation.message.reply(f"manager unreachable 😟: {e.message}",
-                                           mention_author=False)
-            return
-        workers = data.get("workers") or []
-        if workers:
-            lines = [
-                f"worker `{w.get('id')}` - {w.get('engine') or '?'}"
-                + (f", {w['gpu']}" if w.get("gpu") else "")
-                + f", seen {w.get('last_seen_ago')}s ago"
-                for w in workers
-            ]
-            worker_text = "\n".join(lines)
-        else:
-            worker_text = "no worker session is alive. jobs are waiting. " \
-                          " activate cloud first."
-        await invocation.message.reply(
-            f"```\nqueued: {data.get('queued')}\ninflight: {data.get('inflight')}"
-            f"\nworkers:\n{worker_text}\n```",
-        )
-
-    def _require_manager(self):
-        if not MANAGER:
             raise CogError(
-                "no manager url set LEECH_YT_URL (or LEECH_TTS_URL). fix leech.",
-                is_user_error=False,
-            )
+                "invalid clip 'end' has to be after 'start'.",
+                is_user_error=True)
+        payload.update(self._cookie_payload())
 
-    def _headers(self) -> dict:
-        headers = {"Accept": "application/json"}
-        if TOKEN:
-            headers["x-leech-token"] = TOKEN
-        return headers
+        note = "yt: audio (mp3)" if payload.get("audio") else \
+               f"yt: video ({payload.get('quality') or 720}p)"
 
-    async def _call(self, method: str, path: str, json_body: dict | None = None) -> httpx.Response:
+        status_msg = await self._reply(invocation.message, f"{note} - queued...")
+        failures: list[tuple[str, str]] = []
+        for index, lane_name in enumerate(order):
+            lane = self.lanes.get(lane_name)
+            if lane is None:
+                failures.append((lane_name, "lane not configured"))
+                continue
+            try:
+                if index == 0:
+                    await self._edit(status_msg, f"{note} - {lane_name}: submitting...")
+                job_id = await lane.submit(payload)
+                result = await self._await_lane(lane, job_id, note, status_msg)
+            except _LaneFail as exc:
+                failures.append((lane_name, exc.message))
+                _logger.warning("yt lane '%s' failed: %s", lane_name, exc.message)
+                if index + 1 < len(order):
+                    await self._edit(
+                        status_msg,
+                        f"{note} - {lane_name} failed "
+                        f"({exc.message[:120]}) - trying {order[index + 1]}...")
+                continue
+            await self._deliver(invocation, status_msg, result, lane_name)
+            return
+
+        parts = [f"{name}: {msg[:160]}" for name, msg in failures]
+        raise YtError("every lane failed - " + " · ".join(parts))
+
+    async def queue_handler(self, invocation: Invocation):
+        lines = ["```"]
+        for name in ("hub", "colab"):
+            lane = self.lanes.get(name)
+            if lane is None:
+                lines.append(f"{name:6s}  not configured")
+                continue
+            try:
+                if name == "hub":
+                    health = await lane.health()
+                    runner = health.get("runner") or {}
+                    if runner.get("dispatch"):
+                        state = f"armed ({runner.get('repo') or '?'})"
+                    else:
+                        state = "dispatch off - janitor sweeps every 15 min"
+                    lines.append(f"hub    queued: {health.get('queue_depth', 0)}"
+                                 f" · runner: {state}")
+                else:
+                    page = await lane.health()
+                    workers = [w for w in (page.get("workers") or [])
+                               if isinstance(w, dict)]
+                    if workers:
+                        who = "; ".join(
+                            f"{w.get('id') or '?'}"
+                            + (f", {w.get('gpu')}" if w.get("gpu") else "")
+                            + f" ({w.get('last_seen_ago', '?')}s ago)"
+                            for w in workers[:4])
+                    else:
+                        who = "none - start the colab/kaggle notebook"
+                    lines.append(f"colab  queued: {page.get('queued', 0)}"
+                                 f" · inflight: {page.get('inflight', 0)}"
+                                 f" · workers: {who}")
+            except _LaneFail as exc:
+                lines.append(f"{name:6s}  unreachable - {exc.message[:100]}")
+        cookie = self.cookies.stats()
+        if cookie:
+            lines.append(f"cookies: {cookie['lines']} lines, "
+                         f"{cookie['age_s'] // 3600}h old - sent on every job")
+        lines.append("```")
+        await self._reply(invocation.message, "\n".join(lines))
+
+    async def cookies_handler(self, invocation: Invocation):
+        action = str(invocation.arguments.get("action") or "").strip().lower()
+        if action == "clear":
+            cleared = self.cookies.clear()
+            await self._reply(
+                invocation.message,
+                "cookie file forgotten." if cleared else
+                "no cookie file was stored anyway.")
+            return
+        if action:
+            raise CogError("the only cookies sub-action is `clear`. attach "
+                           "a cookies.txt to store one.",
+                           is_user_error=True)
+
+        attachments = list(getattr(invocation.message, "attachments", []) or [])
+        if not attachments:
+            stats = self.cookies.stats()
+            if not stats:
+                await self._reply(
+                    invocation.message,
+                    "no cookie file stored. attach a netscape cookies.txt "
+                    "(export it with a 'Get cookies.txt' extension while "
+                    "logged in on a burner account) to this command to "
+                    "store one. it rides every yt job to both lanes.")
+            else:
+                await self._reply(
+                    invocation.message,
+                    f"cookies stored: {stats['lines']} lines, "
+                    f"{stats['size'] // 1024}kb, "
+                    f"{stats['age_s'] // 3600}h old - sent on every yt job "
+                    "to hub and colab. `>ytdlp cookies clear` forgets it.")
+            return
+
+        attachment = attachments[0]
+        if attachment.size and attachment.size > COOKIE_MAX_BYTES:
+            raise CogError(
+                f"that file is {attachment.size // 1000}kb - the cap is "
+                f"{COOKIE_MAX_BYTES // 1000}kb.", is_user_error=True)
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                if method == "GET":
-                    return await client.get(MANAGER + path, headers=self._headers())
-                return await client.post(
-                    MANAGER + path, json=json_body, headers=self._headers()
-                )
-        except httpx.HTTPError as e:
-            raise _ManagerError("offline", f"can't reach the manager 😟 ({e.__class__.__name__})")
-
-    async def _enqueue(self, kind: str, payload: dict) -> dict:
-        response = await self._call("POST", "/api/jobs", {"kind": kind, "payload": payload})
-        if response.status_code == 401:
-            raise _ManagerError("auth", "token rejected. LEECH_YT_TOKEN vs manager TOKEN. fix leech.")
-        if response.status_code == 400:
-            detail = "?"
-            try:
-                detail = response.json().get("detail", "?")
-            except Exception:  # noqa: BLE001
-                pass
-            raise CogError(str(detail), is_user_error=True)
-        if response.status_code >= 400:
-            raise _ManagerError("server", f"manager said {response.status_code}")
-        return response.json()
-
-    async def _job_view(self, job_id: str) -> dict:
-        response = await self._call("GET", f"/api/jobs/{job_id}")
-        if response.status_code == 404:
-            raise _ManagerError("server", "job gone maybe expired?")
-        if response.status_code >= 400:
-            raise _ManagerError("server", f"manager said {response.status_code}")
-        return response.json()
-
-    async def _status_page(self) -> dict:
-        response = await self._call("GET", "/api/status")
-        if response.status_code == 401:
-            raise _ManagerError("auth", "token rejected. LEECH_YT_TOKEN vs manager TOKEN. fix leech.")
-        if response.status_code >= 400:
-            raise _ManagerError("server", f"manager said {response.status_code}")
-        return response.json()
-
-
-    async def _await_job(self, status: discord.Message, job_id: str) -> dict | None:
-        shown = "queued"
-        last_post = time.monotonic()
-        waited = 0.0
-        while True:
-            try:
-                view = await self._job_view(job_id)
-            except _ManagerError as e:
-                await self._fail(status, e.message)
-                return None
-            state = view.get("status")
-            if state == "done":
-                result = view.get("result") or {}
-                if not result:
-                    await self._fail(status, "worker returned an empty result 😟")
-                    return None
-                return result
-            if state == "error":
-                await self._fail(status, str(view.get("error") or "?"))
-                return None
-
-            label = state or "queued"
-            if state == "queued":
-                position = view.get("position")
-                label = f"queued (position {position})" if position else "queued"
-            elif view.get("stage"):
-                label = str(view["stage"])
-            if (label != shown
-                    and time.monotonic() - last_post >= MIN_UPDATE_SECS):
-                shown = label
-                last_post = time.monotonic()
-                status = await self._update(status, f"yt: {label}…")
-
-            if waited >= TIMEOUT:
-                await self._update(
-                    status,
-                    f"yt: still working after {TIMEOUT / 60:.0f}min. the job "
-                    f"({job_id}) will keep running in the cloud; check `>ytdlp queue` later 😁",
-                )
-                return None
-            await asyncio.sleep(POLL_SECS)
-            waited += POLL_SECS
+            data = await attachment.read()
+        except discord.HTTPException as exc:
+            raise YtError(f"couldn't read the attachment: {exc}")
+        text, lines, domains = _validate_cookie_text(data)
+        self.cookies.save(text)
+        await self._reply(
+            invocation.message,
+            f"cookies stored {lines} lines across {domains} domains. "
+            "every yt job carries them to hub and colab "
+            "reexport when downloads start failing again. burner account always.")
 
     async def _deliver(self, invocation: Invocation, status: discord.Message,
-                       result: dict):
+                       result: dict, lane_name: str):
         url = str(result.get("url") or "")
         if not url:
-            await self._fail(status, "worker finished but sent no link 😟")
+            await self._fail(status, "the lane finished but sent no link 😟")
             return
+        size = result.get("size_mb")
+        if size is None and result.get("size"):
+            try:
+                size = round(float(result["size"]) / 1e6, 1)
+            except (TypeError, ValueError):
+                size = None
         embed = discord.Embed(
             title=str(result.get("title") or "download")[:250],
             url=str(result.get("webpage_url") or url),
@@ -329,14 +711,14 @@ class YtdlpCog(Cog):
         if result.get("uploader"):
             embed.set_author(name=str(result["uploader"])[:100])
         fields = [
-            ("file", f"{result.get('size_mb', '?')}mb · "
-                     f"{'mp3' if result.get('audio') else 'mp4'}"),
-            ("duration", str(result.get("duration") or "?")),
+            ("file", f"{size if size is not None else '?'}mb · "
+                     f"{result.get('format') or ('mp3' if result.get('audio') else 'mp4')}"),
+            ("duration", self._fmt_duration(result.get("duration"))),
         ]
         for name, value in fields:
             if value and value != "?":
                 embed.add_field(name=name, value=value, inline=True)
-        embed.set_footer(text="leech · cloud ytdlp")
+        embed.set_footer(text=f"leech · yt · {lane_name}")
         thumb = str(result.get("thumbnail") or "")
         if thumb.startswith("https"):
             embed.set_thumbnail(url=thumb)
@@ -344,21 +726,21 @@ class YtdlpCog(Cog):
             await status.delete()
         except (discord.HTTPException, TypeError):
             pass
-        await invocation.message.reply(
-            content=url,
-        )
+        await invocation.message.reply(content=url)
 
-    async def _update(self, status: discord.Message,
-                      text: str) -> discord.Message:
+    @staticmethod
+    def _fmt_duration(value) -> str:
+        if isinstance(value, str) and ":" in value:
+            return value
         try:
-            fresh = await status.channel.send(text)
-        except discord.HTTPException:
-            return status
-        try:
-            await status.delete()
-        except (discord.HTTPException, TypeError):
-            pass
-        return fresh
+            seconds = int(float(value or 0))
+        except (TypeError, ValueError):
+            return "?"
+        if seconds <= 0:
+            return "?"
+        hours, rem = divmod(seconds, 3600)
+        minutes, secs = divmod(rem, 60)
+        return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
     async def _fail(self, status: discord.Message, message: str):
         try:
@@ -371,6 +753,5 @@ class YtdlpCog(Cog):
             pass
 
 
-def create_cog(context):
-    return YtdlpCog(context)
-
+def create_cog(context: CogContext):
+    return YtdlpCog(context=context)
