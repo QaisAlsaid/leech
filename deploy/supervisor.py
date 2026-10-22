@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import queue
+import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -10,8 +13,9 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-START_CMD = (os.getenv("LEECH_START_CMD") or "python3 -m leech").strip()
+ROOT = HERE.parent 
+
+START_CMD = (os.getenv("LEECH_START_CMD") or "python -m leech").strip()
 STATE_PATH = Path(os.getenv("LEECH_CHANNEL_STATE")
                   or ROOT / "persistent/v1/channel.json")
 PROBE_SECS = float(os.getenv("SUPERVISOR_PROBE_SECS", "75") or 75)
@@ -27,16 +31,68 @@ for pair in (os.getenv("LEECH_CHANNEL_BRANCHES")
         name, _, branch = pair.partition(":")
         CHANNEL_BRANCHES[name.strip().lower()] = branch.strip()
 
+try:
+    START_ARGV: list[str] = shlex.split(START_CMD)
+except ValueError:
+    START_ARGV = []
+SHELL_FALLBACK = not START_ARGV
+
+APP_TOKENS: list[str] = START_ARGV[1:] if START_ARGV else [START_CMD]
+
 
 def _log(message: str) -> None:
     print(f"[supervisor {time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
+def _detect_source_dir() -> Path:
+    for candidate in (ROOT, ROOT / "src"):
+        if (candidate / "leech" / "__init__.py").is_file():
+            return candidate
+    return ROOT
+
+
+SRC_DIR = _detect_source_dir()
+
+
+def _argv_of(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [chunk.decode("utf-8", "replace")
+            for chunk in raw.split(b"\0") if chunk]
+
+
+def _has_tokens(argv: list[str], tokens: list[str]) -> bool:
+    span = len(tokens)
+    if not span or len(argv) < span:
+        return False
+    for i in range(len(argv) - span + 1):
+        if argv[i:i + span] == tokens:
+            return True
+    return False
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    try:
+        return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X", "x")
+    except IndexError:
+        return False
+
+
 def git(*args: str, check: bool = True) -> str:
-    proc = subprocess.run(
-        ["git", "-C", str(ROOT), *args],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: {exc}") from exc
     if check and proc.returncode != 0:
         raise RuntimeError(
             f"git {' '.join(args)} failed: {proc.stderr.strip()[:300]}")
@@ -105,7 +161,7 @@ class ChannelState:
             if isinstance(stored, dict):
                 self.data.update(stored)
         except (OSError, ValueError):
-            pass  
+            pass 
 
     def save(self) -> None:
         with self.lock:
@@ -131,6 +187,9 @@ class Supervisor:
         self.app_started = 0.0
         self.last_error = ""
         self.stop = False
+        self.backoff = 15.0
+        self.last_autopull = 0.0
+        self.spawn_failed = False
 
     def request(self, action: str, **kwargs) -> dict:
         slot: dict = {}
@@ -139,6 +198,20 @@ class Supervisor:
                            "slot": slot, "done": done})
         done.wait(timeout=180)
         return slot.get("result") or {"ok": False, "error": "timeout"}
+
+    def _drain_requests(self) -> None:
+        while True:
+            try:
+                req = self.requests.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                req["slot"]["result"] = self._handle(req)
+            except Exception as exc: 
+                req["slot"]["result"] = {
+                    "ok": False, "error": f"{type(exc).__name__}: {exc}"[:400]}
+            finally:
+                req["done"].set()
 
     def _handle(self, req: dict) -> dict:
         action, kwargs = req["action"], req["kwargs"]
@@ -157,13 +230,14 @@ class Supervisor:
                 self.stop = True
                 return {"ok": True}
             return {"ok": False, "error": f"unknown action {action!r}"}
-        except Exception as exc:  # noqa: BLE001 - sidecar must answer
+        except Exception as exc: 
             self.last_error = f"{type(exc).__name__}: {exc}"
             return {"ok": False, "error": self.last_error[:400]}
 
+
     def status(self) -> dict:
         channel = self.state.get("channel", "stable")
-        branch = CHANNEL_BRANCHES.get(str(channel), "?")
+        branch = CHANNEL_BRANCHES.get(channel, "?")
         app = self.app
         return {
             "ok": True,
@@ -171,6 +245,7 @@ class Supervisor:
             "branch": branch,
             "commit": current_commit(),
             "describe": describe(),
+            "source": str(SRC_DIR),
             "pinned": self.state.get("pinned"),
             "autopull": bool(self.state.get("autopull", True)),
             "last_good": self.state.get("last_good"),
@@ -183,47 +258,148 @@ class Supervisor:
             "channels": CHANNEL_BRANCHES,
         }
 
+    def _reap_strays(self, reason: str) -> int:
+        if not os.path.isdir("/proc"):
+            return 0
+        protected = {os.getpid(), os.getppid(), 1}
+        if self.app is not None:
+            protected.add(self.app.pid)
+        reaped = 0
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid in protected:
+                continue
+            argv = _argv_of(pid)
+            if not argv or not _has_tokens(argv, APP_TOKENS):
+                continue
+            cmdline = " ".join(argv)[:90]
+            _log(f"STRAY app process pid {pid} ({cmdline}) - "
+                 f"reaping ({reason})")
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                time.sleep(0.6)
+                if not _pid_alive(pid):
+                    reaped += 1
+                    break
+            else:
+                _log(f"could not reap pid {pid} - check permissions")
+        if reaped:
+            _log(f"reaped {reaped} stray app process(es) ({reason}) - "
+                 "there can be only one")
+        return reaped
 
     def _checkout(self, ref: str) -> str:
-        """move the worktree to a ref; returns the landed commit."""
         git("fetch", "--all", "--quiet")
         git("checkout", "--quiet", "--force", ref)
         if ref.startswith("origin/"):
             git("reset", "--hard", "--quiet", ref)
-        return current_commit()
+        commit = current_commit()
+        self._sync_install()
+        return commit
+
+    def _sync_install(self) -> None:
+        if not (ROOT / "pyproject.toml").is_file():
+            return
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "--no-deps",
+                 "--no-build-isolation", "-e", str(ROOT)],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log(f"editable install error ({exc}) - continuing "
+                 "(imports still come from the git tree)")
+            return
+        if proc.returncode == 0:
+            _log("editable install ok - >version now reads the git tree")
+        else:
+            _log(f"editable install failed (code {proc.returncode}) - "
+                 f"imports still come from the git tree: "
+                 f"{proc.stderr.strip()[:160]}")
 
     def _spawn(self) -> None:
         self._kill_app()
+        self._reap_strays(reason="before spawn")
+        self.spawn_failed = False
         env = dict(os.environ)
         env.update({
             "LEECH_GIT_CHANNEL": self.state.get("channel", "stable"),
             "LEECH_GIT_COMMIT": current_commit(),
             "LEECH_GIT_DESCRIBE": describe(),
+            "LEECH_GIT_SOURCE": str(SRC_DIR),
         })
-        self.app = subprocess.Popen(
-            START_CMD, cwd=str(ROOT), env=env, shell=True,
-            stdout=sys.stdout, stderr=sys.stderr,
-        )
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(SRC_DIR)]
+            + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        try:
+            self.app = subprocess.Popen(
+                START_CMD if SHELL_FALLBACK else START_ARGV,
+                cwd=str(ROOT), env=env, shell=SHELL_FALLBACK,
+                stdin=subprocess.DEVNULL,
+                stdout=sys.stdout, stderr=sys.stderr,
+                start_new_session=True, 
+            )
+        except (OSError, ValueError) as exc:
+            self.spawn_failed = True
+            self.last_error = f"spawn failed: {type(exc).__name__}: {exc}"
+            _log(f"app spawn FAILED: {self.last_error}")
+            self.app = None
+            return
         self.app_started = time.time()
         _log(f"app spawned (pid {self.app.pid}, {current_commit()[:12]}, "
-             f"channel {self.state.get('channel')})")
+             f"channel {self.state.get('channel')}) "
+             f"- source {SRC_DIR}")
 
     def _kill_app(self) -> None:
-        if self.app is None:
+        app, self.app = self.app, None
+        if app is None:
             return
-        if self.app.poll() is None:
-            self.app.terminate()
+        if app.poll() is not None:
+            _log(f"app already dead (pid {app.pid}, exit {app.returncode})")
+            return
+        started = time.time()
+        _log(f"stopping app (pid {app.pid})")
+        try:
+            own_group = os.getpgid(0)
+        except (ProcessLookupError, PermissionError, OSError):
+            own_group = None
+        try:
+            group = os.getpgid(app.pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            group = None
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if group is not None and group != own_group:
+                try:
+                    os.killpg(group, sig)  
+                except (ProcessLookupError, PermissionError):
+                    pass
             try:
-                self.app.wait(timeout=12)
+                app.send_signal(sig)
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+            try:
+                app.wait(timeout=12)
+                _log(f"app stopped (pid {app.pid}, exit {app.returncode}, "
+                     f"{time.time() - started:.1f}s)")
+                return
             except subprocess.TimeoutExpired:
-                self.app.kill()
-                self.app.wait(timeout=10)
-        self.app = None
+                continue
+        _log(f"app stop FAILED (pid {app.pid}) - the stray reaper will "
+             "catch it before the next spawn")
 
     def _boot_and_probe(self, note: str) -> dict:
         self._spawn()
+        if self.app is None:
+            return {"ok": False, "note": note,
+                    "error": "app failed to spawn - see supervisor log"}
         deadline = time.time() + PROBE_SECS
-        while time.time() < deadline:
+        while time.time() < deadline and not self.stop:
+            self._drain_requests() 
             if self.app is None or self.app.poll() is not None:
                 code = self.app.returncode if self.app else "?"
                 bad = current_commit()
@@ -231,7 +407,7 @@ class Supervisor:
                 self._mark_bad(bad)
                 last_good = self.state.get("last_good")
                 if last_good and last_good != bad:
-                    _log(f"{note}: probe failed at {bad[:12]} - "
+                    _log(f"{note}: probe FAILED at {bad[:12]} - "
                          f"reverting to last_good {last_good[:12]}")
                     notify(f"leech: {note} probe failed at `{bad[:12]}` - "
                            f"auto-reverted to `{last_good[:12]}`.")
@@ -239,12 +415,15 @@ class Supervisor:
                     self._spawn()
                     return {"ok": True, "reverted_to": last_good,
                             "bad_commit": bad, "note": note}
-                _log(f"{note}: probe failed at {bad[:12]} and no last_good "
+                _log(f"{note}: probe FAILED at {bad[:12]} and no last_good "
                      "to fall back to - respawning anyway (crash loop)")
                 self._spawn()
                 return {"ok": False, "bad_commit": bad,
                         "error": "probe failed, no last_good fallback"}
             time.sleep(1.0)
+        if self.stop:
+            return {"ok": False, "note": note,
+                    "error": "interrupted by shutdown"}
         good = current_commit()
         self.state.set("last_good", good)
         _log(f"{note}: probe passed - {good[:12]} is the new last_good")
@@ -322,10 +501,45 @@ class Supervisor:
         self.state.set("autopull", bool(on))
         return {"ok": True, "autopull": bool(on)}
 
+    def _watch_app(self) -> None:
+        if self.app is not None and self.app.poll() is None:
+            self.backoff = 15.0
+            return
+        code = self.app.returncode if self.app is not None else "spawn error"
+        self.last_error = f"app exited (code {code})"
+        _log(f"app died (code {code}) - respawning in {self.backoff:.0f}s")
+        deadline = time.time() + self.backoff
+        self.backoff = min(self.backoff * 2, 300.0)
+        while time.time() < deadline and not self.stop:
+            self._drain_requests()
+            time.sleep(1.0)
+        if not self.stop:
+            self._spawn()
+
+    def _maybe_autopoll(self) -> None:
+        if not (self.state.get("autopull", True)
+                and time.time() - self.last_autopull >= AUTOPULL_SECS):
+            return
+        self.last_autopull = time.time()
+        try:
+            result = self.pull()
+        except Exception as exc:              
+            self.last_error = f"autopull: {type(exc).__name__}: {exc}"
+            _log(f"autopull ERROR (supervisor stays up): "
+                 f"{self.last_error[:200]}")
+            return
+        if result.get("up_to_date"):
+            return
+        if result.get("ok"):
+            _log(f"autopull moved to {str(result.get('commit'))[:12]}")
+        else:
+            _log(f"autopull skipped: {str(result.get('error'))[:160]}")
 
     def run(self) -> int:
         _log(f"supervisor up (start={START_CMD!r}, "
-             f"channels={CHANNEL_BRANCHES}, state={STATE_PATH})")
+             f"channels={CHANNEL_BRANCHES}, state={STATE_PATH}, "
+             f"source={SRC_DIR})")
+        self._reap_strays(reason="supervisor boot")
         channel = self.state.get("channel", "stable")
         branch = CHANNEL_BRANCHES.get(channel)
         if not branch:
@@ -344,48 +558,36 @@ class Supervisor:
         if not result.get("ok") and self.app is None:
             return 1
 
-        last_autopull = time.time()
-        backoff = 15.0
+        self.last_autopull = time.time()
         while not self.stop:
-            try:
-                while True:
-                    req = self.requests.get_nowait()
-                    req["slot"]["result"] = self._handle(req)
-                    req["done"].set()
-            except queue.Empty:
-                pass
-
-            if self.app is not None and self.app.poll() is not None:
-                code = self.app.returncode
-                self.last_error = f"app exited (code {code})"
-                _log(f"app died (code {code}) - respawning in {backoff:.0f}s")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 300.0)
-                self._spawn()
-            else:
-                backoff = 15.0
-
-            if (self.state.get("autopull", True)
-                    and time.time() - last_autopull >= AUTOPULL_SECS):
-                last_autopull = time.time()
-                result = self.pull()
-                if result.get("up_to_date"):
-                    pass
-                elif result.get("ok"):
-                    _log(f"autopull moved to {result.get('commit', '?')[:12]}")
-                else:
-                    _log(f"autopull skipped: "
-                         f"{result.get('error', '?')[:120]}")
-
+            self._drain_requests()
+            self._watch_app()
+            self._maybe_autopoll()
             time.sleep(1.0)
 
         _log("shutdown requested - stopping the app")
         self._kill_app()
         return 0
 
+    def final_cleanup(self) -> None:
+        if self.app is not None and self.app.poll() is None:
+            _log("supervisor exiting - stopping the app")
+        self._kill_app()
+
 
 def main() -> int:
     supervisor = Supervisor()
+
+    def _bail(*_args) -> None:
+        supervisor.stop = True
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _bail)
+        except (ValueError, OSError): 
+            pass
+    atexit.register(supervisor.final_cleanup)
+
     try:
         from control import ControlSidecar 
     except ImportError:
@@ -401,8 +603,7 @@ def main() -> int:
     try:
         return supervisor.run()
     except KeyboardInterrupt:
-        supervisor._kill_app()
-        return 0
+        return 0 
 
 
 if __name__ == "__main__":
