@@ -76,17 +76,25 @@ jobs:
           CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           CB_REPO: ${{ vars.CODEBERG_REPO }}
           SHA: ${{ github.sha }}
+          MSG: ${{ github.event.head_commit.message }}
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$CB_TOKEN" ] || [ -z "$CB_REPO" ]; then
             echo "::warning::set the CODEBERG_REPO variable + CODEBERG_TOKEN secret to enable codeberg statuses"
             exit 0
           fi
+          # first line of the commit message rides along in the status
+          MSG1=$(printf '%s' "$MSG" | head -n 1 | cut -c1-90)
+          DESC='ci running on the github mirror'
+          if [ -n "$MSG1" ]; then
+            DESC="$DESC | $MSG1"
+          fi
+          DESC=${DESC:0:140}
           curl -fsS -X POST "https://codeberg.org/api/v1/repos/$CB_REPO/statuses/$SHA" \
             -H "Authorization: token $CB_TOKEN" \
             -H 'Content-Type: application/json' \
             -d "$(jq -nc --arg state pending \
-                --arg desc 'ci running on the github mirror' \
+                --arg desc "$DESC" \
                 --arg url "$URL" \
                 '{state:$state, context:"ci/gh-mirror", description:$desc, target_url:$url}')"
 
@@ -101,6 +109,7 @@ jobs:
           CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           CB_REPO: ${{ vars.CODEBERG_REPO }}
           SHA: ${{ github.sha }}
+          MSG: ${{ github.event.head_commit.message }}
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TESTS: ${{ needs.tests.result }}
           GATE: ${{ needs.version-gate.result }}
@@ -109,12 +118,17 @@ jobs:
             echo "::warning::set the CODEBERG_REPO variable + CODEBERG_TOKEN secret to enable codeberg statuses"
             exit 0
           fi
+          MSG1=$(printf '%s' "$MSG" | head -n 1 | cut -c1-90)
           STATE=failure
           DESC="tests=$TESTS version-gate=$GATE"
           if [ "$TESTS" = success ] && [ "$GATE" = success ]; then
             STATE=success
             DESC='ci passed on the github mirror'
           fi
+          if [ -n "$MSG1" ]; then
+            DESC="$DESC | $MSG1"
+          fi
+          DESC=${DESC:0:140}
           curl -fsS -X POST "https://codeberg.org/api/v1/repos/$CB_REPO/statuses/$SHA" \
             -H "Authorization: token $CB_TOKEN" \
             -H 'Content-Type: application/json' \
