@@ -127,6 +127,22 @@ def _fetch(root: Path) -> None:
     _git(root, "fetch", "origin", "--tags", "--prune")
 
 
+def _ensure_identity(root: Path) -> None:
+    """runners ship no git identity, so the first commit/tag dies with
+    'Author identity unknown'.  fill repo-local gaps with a bot ident -
+    an identity that already resolves (local or global) is never
+    touched."""
+    for key, value in (("user.name", "release-bot"),
+                       ("user.email", "release-bot@users.noreply.github.com")):
+        proc = _git(root, "config", key, check=False)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            _git(root, "config", key, value)
+            _summary(
+                f"git {key} did not resolve - set {value!r} for the "
+                f"release commits"
+            )
+
+
 def _head(root: Path) -> str:
     return _git(root, "rev-parse", "HEAD").stdout.strip()
 
@@ -181,6 +197,7 @@ def cmd_check_version(root: Path, target: str) -> int:
 def cmd_promote(root: Path) -> int:
     _require_clean(root)
     _fetch(root)
+    _ensure_identity(root)
     head = _head(root)
 
     master = _git(root, "rev-parse", "-q", "--verify", "origin/master",
@@ -242,6 +259,7 @@ def cmd_promote(root: Path) -> int:
 def cmd_finalize(root: Path) -> int:
     _require_clean(root)
     _fetch(root)
+    _ensure_identity(root)
 
     version = read_version(root)
     core, beta = parse_version(version)
@@ -310,6 +328,7 @@ def cmd_bump_canary(root: Path, to: str) -> int:
     if not beta:
         raise ReleaseError(f"--to must be a beta version (X.Y.Z-beta), got {to!r}")
     _fetch(root)
+    _ensure_identity(root)
 
     master = _git(root, "rev-parse", "-q", "--verify", "origin/master",
                   check=False).stdout.strip()
