@@ -1,0 +1,124 @@
+name: ci
+on:
+  pull_request:
+    branches: [canary, dev, master]
+  push:
+    branches: [canary, dev, master, "release/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install
+        run: pip install -e ".[dev]"
+      - name: compile
+        run: python -m compileall -q src
+      - name: pytest
+        run: python -m pytest tests
+
+  version-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: check version rule
+        run: |
+          python scripts/release.py check-version \
+            --target "${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}"
+
+  notify:
+    needs: [tests, version-gate]
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: discord ping
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.event.head_commit.message }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "no DISCORD_WEBHOOK_URL secret - skipping ping"
+            exit 0
+          fi
+          MSG=$(printf 'ci failed on %s (%s)\n%s' "$REF" "$REPO" "$RUN" | jq -Rs .)
+          HEAD=$(printf '%s' "$SHA" | head -c 120 | jq -Rs .)
+          curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "{\"content\":$MSG,\"embeds\":[{\"description\":$HEAD,\"color\":14177041}]}" \
+            || true
+
+  cb-pending:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: codeberg status (pending)
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+          SHA: ${{ github.sha }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$CB_TOKEN" ] || [ -z "$CB_REPO" ]; then
+            echo "::warning::set the CODEBERG_REPO variable + CODEBERG_TOKEN secret to enable codeberg statuses"
+            exit 0
+          fi
+          curl -fsS -X POST "https://codeberg.org/api/v1/repos/$CB_REPO/statuses/$SHA" \
+            -H "Authorization: token $CB_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg state pending \
+                --arg desc 'ci running on the github mirror' \
+                --arg url "$URL" \
+                '{state:$state, context:"ci/gh-mirror", description:$desc, target_url:$url}')"
+
+  cb-final:
+    if: always() && github.event_name == 'push'
+    needs: [tests, version-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: codeberg status (result)
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+          SHA: ${{ github.sha }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TESTS: ${{ needs.tests.result }}
+          GATE: ${{ needs.version-gate.result }}
+        run: |
+          if [ -z "$CB_TOKEN" ] || [ -z "$CB_REPO" ]; then
+            echo "::warning::set the CODEBERG_REPO variable + CODEBERG_TOKEN secret to enable codeberg statuses"
+            exit 0
+          fi
+          STATE=failure
+          DESC="tests=$TESTS version-gate=$GATE"
+          if [ "$TESTS" = success ] && [ "$GATE" = success ]; then
+            STATE=success
+            DESC='ci passed on the github mirror'
+          fi
+          curl -fsS -X POST "https://codeberg.org/api/v1/repos/$CB_REPO/statuses/$SHA" \
+            -H "Authorization: token $CB_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg state "$STATE" \
+                --arg desc "$DESC" \
+                --arg url "$URL" \
+                '{state:$state, context:"ci/gh-mirror", description:$desc, target_url:$url}')"

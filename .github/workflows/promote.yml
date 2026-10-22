@@ -1,0 +1,65 @@
+name: promote
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: canary
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: point origin at the codeberg canonical
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+        run: |
+          if [ -z "$CB_TOKEN" ] || [ -z "$CB_REPO" ]; then
+            echo "::error::promote needs the CODEBERG_REPO repo variable + CODEBERG_TOKEN secret (codeberg token, repository write) - see V10-CICD.md"
+            exit 1
+          fi
+          git remote set-url origin \
+            "https://oauth2:${CB_TOKEN}@codeberg.org/${CB_REPO}.git"
+          git fetch origin --tags --prune
+          git reset --hard origin/canary
+
+      - name: cut the release branch
+        id: promote
+        run: python scripts/release.py promote
+
+      - name: push it to codeberg
+        env:
+          BRANCH: ${{ steps.promote.outputs.branch }}
+        run: git push origin "$BRANCH"
+       
+      - name: open the promotion PR on codeberg
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+          BRANCH: ${{ steps.promote.outputs.branch }}
+          VERSION: ${{ steps.promote.outputs.version }}
+          CHANGELOG: ${{ steps.promote.outputs.changelog }}
+        run: |
+          RESP=$(curl -fsS -X POST \
+            "https://codeberg.org/api/v1/repos/$CB_REPO/pulls" \
+            -H "Authorization: token $CB_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc \
+                --arg base master \
+                --arg head "$BRANCH" \
+                --arg title "release: v$VERSION" \
+                --rawfile body "$CHANGELOG" \
+                '{base:$base, head:$head, title:$title, body:$body}')")
+          echo "promotion PR: $(echo "$RESP" | jq -r '.html_url')"

@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from enum import Enum
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from .registry import TypesRegistry
 from .definition import Cardinality, TypeDefinition, Types
 from leech.core.parser.error import ParseError
-from leech.core.command.runtime import Argument
+
+if TYPE_CHECKING:
+    from leech.core.command.runtime import Argument
 
 
 class IntType(TypeDefinition):

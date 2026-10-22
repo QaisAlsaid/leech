@@ -38,7 +38,18 @@ def test_no_trigger():
     result = lex("hello world", PREFIXES)
 
     assert result.trigger == Triggers.NONE
-    assert result.tokens == []
+    assert result.prefix is None
+    # v10: no-trigger messages still lex (continue_on_no_trigger=True is the
+    # default) - the dispatcher's cogs fallback path consumes these tokens.
+    assert tokens(result) == [
+        (TokenType.RAW, "hello"),
+        (TokenType.RAW, "world"),
+    ]
+
+    # with continue_on_no_trigger=False the lexer short-circuits to no tokens.
+    skipped = lex("hello world", PREFIXES, continue_on_no_trigger=False)
+    assert skipped.trigger == Triggers.NONE
+    assert skipped.tokens == []
 
 
 def test_named_argument():
