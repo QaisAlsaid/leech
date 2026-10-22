@@ -1,4 +1,5 @@
-import os
+import os, re
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 _owner_id_str = os.getenv("OWNER_ID")
 _bot_id_str = os.getenv("BOT_ID")
@@ -53,6 +54,74 @@ prefixes: list[str] = [
     p.strip() for p in os.getenv("PREFIXES", ">, $").split(",") if p.strip()
 ]
 
-from importlib.metadata import version
 
-version_str: str = version("leech")
+def _tree_version() -> str:
+    baked = (os.getenv("LEECH_GIT_DESCRIBE") or "").strip()
+    if baked:
+        return baked
+    import subprocess
+
+    for source_dir in ("src", "."):
+        try:
+            describe = subprocess.run(
+                ["git", "-C", source_dir, "describe", "--tags", "--always", "--dirty"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if describe.returncode == 0 and describe.stdout.strip():
+            out = describe.stdout.strip()
+            if re.fullmatch(r"[0-9a-f]{7,40}", out):
+                try:
+                    return f"{_pkg_version('leech')} @ {out[:12]}"
+                except PackageNotFoundError:
+                    return out[:12]
+            return out
+    try:
+        pkg = _pkg_version("leech")
+    except PackageNotFoundError:
+        pkg = ""
+    describe = (os.getenv("LEECH_GIT_DESCRIBE") or "").strip()
+    if not describe:
+        import subprocess
+
+        for source_dir in ("src", "."):
+            try:
+                proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        source_dir,
+                        "describe",
+                        "--tags",
+                        "--always",
+                        "--dirty",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if proc.returncode == 0 and proc.stdout.strip():
+                describe = proc.stdout.strip()
+                break
+
+    def _channel_suffix(out: str) -> str:
+        channel = (os.getenv("LEECH_GIT_CHANNEL") or "").strip().lower()
+        if channel in ("canary", "dev"):
+            return f"{out} ({channel})"
+        return out
+
+    if not describe:
+        return _channel_suffix(pkg) if pkg else "unknown"
+    if re.fullmatch(r"[0-9a-f]{7,40}", describe):
+        return _channel_suffix(f"{pkg} @ {describe[:12]}" if pkg else describe[:12])
+    if pkg and pkg not in describe:
+        return _channel_suffix(f"{pkg} - {describe}")
+    return _channel_suffix(describe)
+
+
+version_str: str = _tree_version()

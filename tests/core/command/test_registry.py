@@ -47,8 +47,11 @@ def test_duplicate_registration_fails():
 def test_duplicate_nested_registration_is_transactional():
     registry = CommandRegistry()
 
-    existing = command("admin.existing")
-    assert registry.register_command("admin.existing", existing)
+    # v10: nested commands are registered via the subcommands dict, not
+    # dotted paths - build the prior state the current way.
+    existing = command("existing")
+    prior_admin = command("admin", {"existing": existing})
+    assert registry.register_command("admin", prior_admin)
 
     new_child = command("new")
     conflicting_child = command("existing")
@@ -64,7 +67,7 @@ def test_duplicate_nested_registration_is_transactional():
     assert not registry.register_command("admin", admin)
 
     # Neither the root nor the non-conflicting child should have been committed.
-    assert registry.get_command("admin") is None
+    assert registry.get_command("admin") is prior_admin
     assert registry.get_command("admin.new") is None
     assert registry.get_command("admin.existing") is existing
 

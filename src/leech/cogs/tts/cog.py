@@ -441,6 +441,40 @@ class RemoteTtsCog(Cog):
             text += f" failed: {', '.join(failed)} 😟"
         await self._update_status(status, text)
 
+    def _kaggle_lines(self, kag: dict, has_workers: bool, queued: int) -> str:
+        if not kag or not kag.get("configured"):
+            return ""
+        bits: list[str] = []
+        last = kag.get("last_wake") or {}
+        if last:
+            try:
+                age = max(int(time.time() - float(last.get("at") or 0)), 0)
+            except (TypeError, ValueError):
+                age = 0
+            wake_bits = [f"last wake {age // 60}m ago"]
+            if last.get("version"):
+                wake_bits.append(f"v{last['version']}")
+            wake_bits.append("gpu" if last.get("gpu") else "cpu")
+            if last.get("reason"):
+                wake_bits.append(str(last["reason"])[:44])
+            if last.get("error"):
+                wake_bits.append(f"err {str(last['error'])[:50]}")
+            bits.append(" · ".join(wake_bits))
+        else:
+            bits.append("never woken")
+        if kag.get("cooldown_left"):
+            bits.append(f"cooldown {int(kag['cooldown_left'])}s")
+        # v9: the pixeldrain flag from the manager - answers "is the key
+        # even set there" without opening vercel.
+        if "pixeldrain" in kag:
+            bits.append("pixeldrain" if kag.get("pixeldrain")
+                        else "pixeldrain: NO KEY on manager")
+        out = f"\nkaggle: {' · '.join(bits)}"
+        if queued and not has_workers:
+            out += ("\nhint: jobs waiting + no worker -> the next >tts awakes "
+                    "the kernel.")
+        return out
+
     async def voice_ping_handler(self, invocation: Invocation):
         self._require_manager()
         try:
@@ -462,13 +496,15 @@ class RemoteTtsCog(Cog):
         else:
             worker_text = "no worker session alive. jobs will queue until one is activated."
         voices = data.get("voices") or []
+        kag_lines = self._kaggle_lines(data.get("kaggle") or {},
+                                       bool(workers), data.get("queued") or 0)
         await invocation.message.reply(
             f"```\nqueued: {data.get('queued')}\ninflight: {data.get('inflight')}"
             f"\nvoices on manager: {len(voices)}"
-            f"\nworkers:\n{worker_text}\n```",
+            f"\nworkers:\n{worker_text}{kag_lines}\n```",
             mention_author=False,
         )
-
+    
     def _require_manager(self):
         if not MANAGER:
             raise CogError(
@@ -537,6 +573,22 @@ class RemoteTtsCog(Cog):
             entry.get("text"),
         )
 
+    def _wake_note(self, wake) -> str:
+        if not isinstance(wake, dict) or not wake.get("status"):
+            return ""
+        state = str(wake.get("status"))
+        reason = str(wake.get("reason") or "")
+        if state == "pushed":
+            return (f" · waking kaggle "
+                    f"({'gpu' if wake.get('gpu') else 'cpu'}, "
+                    f"v{wake.get('version') or '?'})")
+        if state == "booting":
+            return f" · kaggle: booting ({reason[:70]})"
+        if state == "error":
+            return f" · kaggle wake failed: {reason[:80]}"
+        if reason:
+            return f" · kaggle: {state} ({reason[:50]})"
+        return f" · kaggle: {state}"
 
     async def _run_job(self, invocation: Invocation, payload: dict,
                        label: str, name: str):
@@ -548,10 +600,17 @@ class RemoteTtsCog(Cog):
             raise CogError(f"manager: {e.message}", is_user_error=False)
         job_id = job.get("id")
         position = job.get("position") or 1
+        wake_note = self._wake_note(job.get("wake"))
         status = await invocation.message.reply(
-            f"tts: queued (position {position}). {label}...", mention_author=False
+            f"tts: queued (position {position}). {label}{wake_note}",
+            mention_author=False
         )
 
+        # v9: the wait loop below was lost in the "kiggle wakes handle"
+        # splice (commit 6dad3a9) - the bot queued jobs, replied "queued"
+        # and then never polled again, so finished clips never arrived.
+        # restored verbatim from the v8 cog: poll the job, edit the status
+        # through stages, deliver the audio when the worker posts it.
         shown = f"queued (position {position})"
         last_post = time.monotonic()
         waited = 0.0
@@ -566,7 +625,12 @@ class RemoteTtsCog(Cog):
                 result = view.get("result") or {}
                 data, ext = await self._result_bytes(result)
                 if data is None:
-                    await self._fail_status(status, "worker sent no audio back 😟")
+                    await self._fail_status(
+                        status,
+                        "the worker finished but sent no audio back 😟 "
+                        f"({result.get('engine') or '?'} · "
+                        f"{result.get('gen_seconds') or '?'}s)"
+                    )
                     return
                 engine = str(result.get("engine") or "?")
                 gen = result.get("gen_seconds")
@@ -593,7 +657,8 @@ class RemoteTtsCog(Cog):
                 try:
                     page = await self._call_json("GET", "/api/status")
                     if not page.get("workers"):
-                        no_worker = " no worker session is alive. activate it first."
+                        no_worker = (" no worker session is alive - the next "
+                                     ">tts re-wakes kaggle on its own")
                 except _ManagerError:
                     pass
                 await self._update_status(

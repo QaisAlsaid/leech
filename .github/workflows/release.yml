@@ -1,0 +1,128 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tagged: ${{ steps.finalize.outputs.tagged }}
+      version: ${{ steps.finalize.outputs.version }}
+      next: ${{ steps.finalize.outputs.next_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: point origin at the codeberg canonical
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+        run: |
+          if [ -z "$CB_TOKEN" ] || [ -z "$CB_REPO" ]; then
+            echo "::error::release needs the CODEBERG_REPO repo variable + CODEBERG_TOKEN secret (codeberg token, repository write) - see V10-CICD.md"
+            exit 1
+          fi
+          git remote set-url origin \
+            "https://oauth2:${CB_TOKEN}@codeberg.org/${CB_REPO}.git"
+
+      - name: tag + notes (idempotent)
+        id: finalize
+        run: python scripts/release.py finalize
+
+      - name: mirror the tag + master here (gh release needs the tag)
+        if: steps.finalize.outputs.tagged == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git remote add gh \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push gh "refs/tags/${{ steps.finalize.outputs.tag }}" HEAD:master
+
+      - name: github release
+        if: steps.finalize.outputs.tagged == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.finalize.outputs.tag }}
+          VERSION: ${{ steps.finalize.outputs.version }}
+          NOTES: ${{ steps.finalize.outputs.notes }}
+        run: gh release create "$TAG" --title "v$VERSION" --notes-file "$NOTES"
+
+      - name: codeberg release (best-effort)
+        if: steps.finalize.outputs.tagged == 'true'
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+          TAG: ${{ steps.finalize.outputs.tag }}
+          VERSION: ${{ steps.finalize.outputs.version }}
+          NOTES: ${{ steps.finalize.outputs.notes }}
+        run: |
+          curl -fsS -X POST "https://codeberg.org/api/v1/repos/$CB_REPO/releases" \
+            -H "Authorization: token $CB_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg tag "$TAG" --arg name "v$VERSION" \
+                --rawfile body "$NOTES" \
+                '{tag_name:$tag, name:$name, body:$body}')" \
+            || echo "::warning::codeberg release failed - the tag and the github release are already out; create the codeberg one by hand if you want it"
+
+      - name: discord ping
+        if: steps.finalize.outputs.tagged == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.finalize.outputs.version }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ steps.finalize.outputs.version }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "no DISCORD_WEBHOOK_URL secret - skipping ping"
+            exit 0
+          fi
+          MSG=$(printf 'release v%s is out (%s)\n%s' "$VERSION" "$REPO" "$RUN" | jq -Rs .)
+          curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "{\"content\":$MSG,\"embeds\":[{\"title\":\"changelog\",\"url\":$RUN,\"color\":5763719}]}" \
+            || true
+
+  bump-canary:
+    needs: release
+    if: needs.release.outputs.tagged == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: canary
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: point origin at the codeberg canonical
+        env:
+          CB_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          CB_REPO: ${{ vars.CODEBERG_REPO }}
+        run: |
+          if [ -z "$CB_TOKEN" ] || [ -z "$CB_REPO" ]; then
+            echo "::error::bump-canary needs the CODEBERG_REPO repo variable + CODEBERG_TOKEN secret (codeberg token, repository write) - see V10-CICD.md"
+            exit 1
+          fi
+          git remote set-url origin \
+            "https://oauth2:${CB_TOKEN}@codeberg.org/${CB_REPO}.git"
+          git fetch origin --tags --prune
+          git reset --hard origin/canary
+
+      - name: back-merge + bump + push
+        run: python scripts/release.py bump-canary --to "${{ needs.release.outputs.next }}"
