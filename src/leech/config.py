@@ -1,4 +1,5 @@
 import os
+import re
 
 _owner_id_str = os.getenv("OWNER_ID")
 _bot_id_str = os.getenv("BOT_ID")
@@ -53,6 +54,46 @@ prefixes: list[str] = [
     p.strip() for p in os.getenv("PREFIXES", ">, $").split(",") if p.strip()
 ]
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
-version_str: str = version("leech")
+
+def _tree_version() -> str:
+    """v9: >version used to show whatever pip baked at panel build time -
+    pulls via >channel swap the git tree but never touch site-packages
+    metadata, so the number went stale the moment you deployed.
+
+    resolution order: LEECH_GIT_DESCRIBE (the supervisor bakes this into
+    the app env on every spawn, e.g. 'v0.4.4-beta-3-g1bcbe76') -> git
+    describe of the running source tree -> importlib metadata (last
+    resort, only right on a fresh pip install)."""
+    baked = (os.getenv("LEECH_GIT_DESCRIBE") or "").strip()
+    if baked:
+        return baked
+    import subprocess
+
+    for source_dir in ("src", "."):
+        try:
+            describe = subprocess.run(
+                ["git", "-C", source_dir, "describe", "--tags", "--always",
+                 "--dirty"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if describe.returncode == 0 and describe.stdout.strip():
+            out = describe.stdout.strip()
+            # a bare --always hash (no tags reachable) isn't helpful alone -
+            # keep the pip version next to it ('0.4.4-beta @ 1bcbe76').
+            if re.fullmatch(r"[0-9a-f]{7,40}", out):
+                try:
+                    return f"{_pkg_version('leech')} @ {out[:12]}"
+                except PackageNotFoundError:
+                    return out[:12]
+            return out
+    try:
+        return _pkg_version("leech")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+version_str: str = _tree_version()

@@ -2,16 +2,18 @@ from __future__ import annotations
 
 
 import asyncio
+import io
+import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 import discord
 import httpx
-import json
 
 from leech.core.cog.cog import Cog
 from leech.core.cog.context import CogContext
@@ -29,14 +31,24 @@ HUB_URL = (os.getenv("LEECH_HUB_URL") or "").strip().rstrip("/")
 HUB_TOKEN = (os.getenv("LEECH_HUB_TOKEN") or "").strip()
 COLAB_URL = (os.getenv("LEECH_YT_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
 COLAB_TOKEN = (os.getenv("LEECH_YT_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or "").strip()
-PROVIDERS_ENV = (os.getenv("LEECH_YT_PROVIDERS") or "hub,colab").strip()
+PROVIDERS_ENV = (os.getenv("LEECH_YT_PROVIDERS") or "colab,hub").strip()
+# v9: the built-in lane order flipped to colab-first. the hub runner kept
+# bot-check-failing on youtube (datacenter ip) so every job paid the
+# fail-tax before falling back to kaggle, which just worked. per-job
+# provider= still pins, LEECH_YT_PROVIDERS still overrides, and
+# `>ytdlp default` pins it persistently now.
 TIMEOUT = float(os.getenv("LEECH_YT_TIMEOUT", "1800") or 1800)
 MAX_MB = float(os.getenv("LEECH_YT_MAX_MB", "200") or 200)
 POLL_SECS = 2.5
 PROGRESS_MIN_SECS = 3.0
 REPLY_LIMIT = 1990
 COOKIE_PATH = Path("persistent/v1/ytdlp/cookies.txt")
+PREFS_PATH = Path("persistent/v1/ytdlp/prefs.json")
 COOKIE_MAX_BYTES = 200_000
+# v9: finished files <= this get re-uploaded as a real discord attachment
+# (inline player, the notsobot .dl behavior). bigger ones stay links -
+# pixeldrain links once PIXELDRAIN_KEY rides the worker.
+ATTACH_LIMIT = int(os.getenv("LEECH_YT_ATTACH_MB", "10") or 10) * 1024 * 1024
 
 _URL_RE = re.compile(r"^https?://\S+$")
 _PROVIDER_RE = re.compile(r"^(hub|colab)$", re.IGNORECASE)
@@ -152,6 +164,38 @@ class _CookieStore:
                     and line.count("\t") >= 6)
         return {"size": stat.st_size, "lines": lines,
                 "age_s": max(0, int(time.time() - stat.st_mtime))}
+
+
+class _PrefStore:
+    """v9: tiny persisted prefs (the `>ytdlp default` lane pin). same
+    atomic-write pattern as the cookie store; one key, one file."""
+
+    def __init__(self, path: Path = PREFS_PATH):
+        self._path = path
+        self._lock = threading.Lock()
+
+    def get(self, key: str, default: str = "") -> str:
+        with self._lock:
+            try:
+                data = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return default
+            return str(data.get(key) or default)
+
+    def set(self, key: str, value: str) -> None:
+        with self._lock:
+            try:
+                data = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            data[key] = value
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._path.with_suffix(".json.temp")
+                tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                os.replace(tmp, self._path)
+            except OSError:
+                pass  # pref is cosmetic - never fail a command over it
 
 
 class _HubLane:
@@ -339,9 +383,13 @@ def _lane_env_ok(name: str) -> bool:
     return bool(COLAB_URL and COLAB_TOKEN)
 
 
-def _provider_order(forced: Optional[str]) -> list[str]:
+def _provider_order(forced: Optional[str], pinned: str = "") -> list[str]:
     if forced:
         return [forced]
+    # v9: `>ytdlp default colab|hub` pins the lane persistently; auto
+    # (or a missing pref) rides the env order, colab-first now.
+    if pinned in ("hub", "colab"):
+        return [pinned]
     order = []
     for name in PROVIDERS_ENV.split(","):
         name = name.strip().lower()
@@ -365,6 +413,7 @@ class YtdlpCog(Cog):
         self.lanes = {name: factory()
                       for name, factory in _LANES.items() if _lane_env_ok(name)}
         self.cookies = _CookieStore()
+        self.prefs = _PrefStore()
 
     async def shutdown(self) -> None:
         for lane in getattr(self, "lanes", {}).values():
@@ -454,6 +503,31 @@ class YtdlpCog(Cog):
                     arguments=[],
                     subcommands={},
                     binding=NativeBinding(handler=self.queue_handler),
+                ),
+                "default": Command(
+                    name="default",
+                    description="show or pin the default lane.",
+                    usage_example=">ytdlp default lane=colab",
+                    help_content=(
+                        "without arguments: shows the current default lane "
+                        "and the full try-order. `lane=colab` sends every "
+                        "download to the manager queue (colab/kaggle "
+                        "workers), `lane=hub` to the github runner, "
+                        "`lane=auto` rides the env order (colab first). "
+                        "the pin survives restarts; per-job provider= "
+                        "still beats it."
+                    ),
+                    arguments=[
+                        Argument(
+                            name="lane",
+                            description="colab | hub | auto.",
+                            usage_example="lane=colab",
+                            type=TypesRegistry.require(Types.STR),
+                            required=False,
+                        ),
+                    ],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.default_handler),
                 ),
                 "wake": Command(
                     name="wake",
@@ -573,7 +647,7 @@ class YtdlpCog(Cog):
         if forced and not _PROVIDER_RE.match(forced):
             raise CogError("provider must be hub or colab.",
                            is_user_error=True)
-        order = _provider_order(forced)
+        order = _provider_order(forced, self.prefs.get("default_lane"))
         if not order:
             raise YtError("no yt lane is configured - ask qais to fix leech "
                           "(LEECH_HUB_* / LEECH_YT_*).")
@@ -646,6 +720,31 @@ class YtdlpCog(Cog):
         parts = [f"{name}: {msg[:160]}" for name, msg in failures]
         raise YtError("every lane failed - " + " · ".join(parts))
 
+    async def default_handler(self, invocation: Invocation):
+        """v9: `>ytdlp default` - show or persistently pin the lane."""
+        raw = str(invocation.arguments.get("lane") or "").strip().lower()
+        if not raw:
+            pinned = self.prefs.get("default_lane") or "auto"
+            order = _provider_order(None, self.prefs.get("default_lane"))
+            trail = " -> ".join(order) if order else "none configured"
+            await self._reply(invocation.message,
+                              f"default lane: **{pinned}** · try order: {trail}")
+            return
+        if raw not in ("colab", "hub", "auto"):
+            raise CogError("lane must be colab, hub or auto.",
+                           is_user_error=True)
+        if raw in ("hub", "colab") and self.lanes.get(raw) is None:
+            raise CogError(f"the {raw} lane isn't configured on this bot.",
+                           is_user_error=True)
+        self.prefs.set("default_lane", raw)
+        order = _provider_order(None, raw)
+        trail = " -> ".join(order) if order else "none configured"
+        await self._reply(
+            invocation.message,
+            f"default lane pinned: **{raw}** · try order: {trail}"
+            + (" (provider= on a single job still overrides)" if raw != "auto" else ""),
+        )
+
     async def queue_handler(self, invocation: Invocation):
         lines = ["```"]
         for name in ("hub", "colab"):
@@ -714,6 +813,9 @@ class YtdlpCog(Cog):
         if cookie:
             lines.append(f"cookies: {cookie['lines']} lines, "
                          f"{cookie['age_s'] // 3600}h old - sent on every job")
+        pinned = self.prefs.get("default_lane") or "auto"
+        lines.append(f"default lane: {pinned}"
+                     + ("" if pinned == "auto" else "  (>ytdlp default lane=auto to reset)"))
         lines.append("```")
         await self._reply(invocation.message, "\n".join(lines))
 
@@ -801,6 +903,11 @@ class YtdlpCog(Cog):
             await self._fail(status, "the lane finished but sent no link 😟")
             return
 
+          # v9: files small enough for discord ride back as real
+          # attachments - inline video/audio player, the notsobot .dl
+          # behavior. big ones stay links (a user line is ~10mb).
+          data = await self._fetch_for_attach(url, result)
+
           size = result.get("size_mb")
           if size is None and result.get("size"):
             try:
@@ -844,11 +951,60 @@ class YtdlpCog(Cog):
           except (discord.HTTPException, TypeError):
             pass
 
+          if data is not None:
+            await invocation.message.reply(
+              content=message_text,
+              file=discord.File(io.BytesIO(data),
+                                filename=self._attach_name(result)),
+              mention_author=False,
+              allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
           await invocation.message.reply(
             content=message_text,
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
           )
+
+    def _attach_name(self, result: dict) -> str:
+        title = str(result.get("title") or "download")
+        stem = re.sub(r"[^\w\-. ]+", "_", title).strip().replace(" ", "_")[:80]
+        stem = stem.strip("._") or "download"
+        url = str(result.get("url") or "")
+        dot = url.rsplit("/", 1)[-1].rpartition(".")[2].lower()
+        ext = dot if dot in ("mp4", "mp3", "mkv", "webm", "m4a", "ogg", "wav") \
+            else ("mp3" if result.get("audio") else "mp4")
+        return f"{stem}.{ext}"
+
+    async def _fetch_for_attach(self, url: str, result: dict) -> Optional[bytes]:
+        """download the finished file when it fits the attachment budget.
+        streams so an oversized file aborts early instead of eating ram;
+        any hiccup just falls back to the plain link."""
+        size = result.get("size_mb")
+        try:
+            known_mb = float(size)
+        except (TypeError, ValueError):
+            known_mb = None
+        if known_mb is not None and known_mb * 1024 * 1024 > ATTACH_LIMIT:
+            return None
+        try:
+            chunks: list[bytes] = []
+            held = 0
+            async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(240.0, connect=20.0),
+                    follow_redirects=True) as client:
+                async with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes(64 * 1024):
+                        held += len(chunk)
+                        if held > ATTACH_LIMIT:
+                            return None
+                        chunks.append(chunk)
+            data = b"".join(chunks)
+            return data if data else None
+        except (httpx.HTTPError, OSError):
+            return None
 
     @staticmethod
     def _fmt_duration(value) -> str:

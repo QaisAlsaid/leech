@@ -306,8 +306,70 @@ class Supervisor:
         return commit
 
     def _sync_install(self) -> None:
+        """v9: two jobs now.
+
+        1. dependency sync - when requirements.txt / pyproject.toml
+           changed since the last spawn, run a REAL `pip install -r
+           requirements.txt` before the app restarts. that's the answer
+           to "pulls never rebuild - what if we added a dep?": code-only
+           pulls just restart the bot (python needs no build), dep pulls
+           install first so the probe judges the new code with its deps
+           actually present instead of dying on ImportError and
+           auto-reverting.
+        2. the editable install - keeps entry points and any metadata
+           readers pointed at the git tree (cheap, runs every checkout).
+        """
         if not (ROOT / "pyproject.toml").is_file():
             return
+        import hashlib
+
+        parts = []
+        for name in ("requirements.txt", "pyproject.toml"):
+            try:
+                parts.append(name + ":"
+                             + hashlib.sha256(
+                                 (ROOT / name).read_bytes()).hexdigest()[:16])
+            except OSError:
+                parts.append(name + ":missing")
+        signature = "|".join(parts)
+        if signature != self.state.get("deps_signature"):
+            self.state.set("deps_signature", signature)
+            opt_out = (os.getenv("LEECH_PIP_SYNC") or "1").strip().lower() \
+                in ("0", "false", "off", "no")
+            reqs = ROOT / "requirements.txt"
+            if opt_out:
+                _log("deps changed but LEECH_PIP_SYNC is off - "
+                     "skipping the pip install")
+            elif reqs.is_file():
+                budget = float(os.getenv("LEECH_PIP_TIMEOUT", "900") or 900)
+                _log("dependency files changed - pip install -r "
+                     "requirements.txt (first boot after a container "
+                     "rebuild this is a no-op sanity pass)")
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "-q",
+                         "-r", str(reqs)],
+                        cwd=str(ROOT), capture_output=True, text=True,
+                        timeout=budget,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    _log(f"deps install error ({exc}) - the probe will "
+                         "judge the app as-is")
+                    proc = None
+                if proc is not None:
+                    if proc.returncode == 0:
+                        _log("deps install ok")
+                        notify("leech: deps changed - installed, "
+                               "restarting on the new set.")
+                    else:
+                        tail = (proc.stderr or proc.stdout or "").strip()
+                        _log(f"deps install FAILED (code "
+                             f"{proc.returncode}): {tail[:300]}")
+                        notify("leech: pip install of new deps FAILED - "
+                               "the probe will likely revert.")
+            else:
+                _log("deps changed but there is no requirements.txt - "
+                     "nothing to install")
         try:
             proc = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-q", "--no-deps",

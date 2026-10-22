@@ -464,6 +464,11 @@ class RemoteTtsCog(Cog):
             bits.append("never woken")
         if kag.get("cooldown_left"):
             bits.append(f"cooldown {int(kag['cooldown_left'])}s")
+        # v9: the pixeldrain flag from the manager - answers "is the key
+        # even set there" without opening vercel.
+        if "pixeldrain" in kag:
+            bits.append("pixeldrain" if kag.get("pixeldrain")
+                        else "pixeldrain: NO KEY on manager")
         out = f"\nkaggle: {' · '.join(bits)}"
         if queued and not has_workers:
             out += ("\nhint: jobs waiting + no worker -> the next >tts awakes "
@@ -600,6 +605,70 @@ class RemoteTtsCog(Cog):
             f"tts: queued (position {position}). {label}{wake_note}",
             mention_author=False
         )
+
+        # v9: the wait loop below was lost in the "kiggle wakes handle"
+        # splice (commit 6dad3a9) - the bot queued jobs, replied "queued"
+        # and then never polled again, so finished clips never arrived.
+        # restored verbatim from the v8 cog: poll the job, edit the status
+        # through stages, deliver the audio when the worker posts it.
+        shown = f"queued (position {position})"
+        last_post = time.monotonic()
+        waited = 0.0
+        while True:
+            try:
+                view = await self._call_json("GET", f"/api/jobs/{job_id}")
+            except _ManagerError as e:
+                await self._fail_status(status, e.message)
+                return
+            state = view.get("status")
+            if state == "done":
+                result = view.get("result") or {}
+                data, ext = await self._result_bytes(result)
+                if data is None:
+                    await self._fail_status(
+                        status,
+                        "the worker finished but sent no audio back 😟 "
+                        f"({result.get('engine') or '?'} · "
+                        f"{result.get('gen_seconds') or '?'}s)"
+                    )
+                    return
+                engine = str(result.get("engine") or "?")
+                gen = result.get("gen_seconds")
+                footer = f" · {engine}" + (f" · {gen}s" if gen else "")
+                await self._deliver(invocation, status, data, ext, name, footer)
+                return
+            if state == "error":
+                await self._fail_status(status, str(view.get("error") or "?"))
+                return
+
+            stage = str(view.get("stage") or "")
+            if state == "queued":
+                pos = view.get("position")
+                stage = f"queued (position {pos})" if pos else "queued"
+            if (stage and stage != shown
+                    and time.monotonic() - last_post >= MIN_UPDATE_SECS):
+                shown = stage
+                last_post = time.monotonic()
+                status = await self._update_status(
+                    status, f"tts: {stage}. {label}..."
+                )
+            if waited >= TIMEOUT:
+                no_worker = ""
+                try:
+                    page = await self._call_json("GET", "/api/status")
+                    if not page.get("workers"):
+                        no_worker = (" no worker session is alive - the next "
+                                     ">tts re-wakes kaggle on its own")
+                except _ManagerError:
+                    pass
+                await self._update_status(
+                    status,
+                    f"tts: still queued after {TIMEOUT / 60:.0f}min "
+                    f"(job {job_id}).{no_worker}",
+                )
+                return
+            await asyncio.sleep(POLL_SECS)
+            waited += POLL_SECS
 
     async def _result_bytes(self, result: dict) -> tuple[bytes | None, str]:
         ext = str(result.get("ext") or "mp3")
