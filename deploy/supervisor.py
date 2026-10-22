@@ -11,6 +11,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
+
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent 
