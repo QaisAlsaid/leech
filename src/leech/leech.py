@@ -31,6 +31,7 @@ COGS = [
     "leech.cogs.mono.cog",
     "leech.cogs.lrc.cog",
     "leech.cogs.ffmpeg.cog",
+    "leech.cogs.channel.cog",
     "leech.cogs.ai.cog",  # always last
 ]
 
