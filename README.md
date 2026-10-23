@@ -117,10 +117,10 @@ A few things **deliberately** stay local: tts voice clone files (and their catal
 
 ## Screenshots
 
-![AI asking for permissions to run command, then running it](ss/ai_and_perms.png)
-![Reminder running out](ss/reminder.png)
-![Leech invoking other bots slash command](ss/slash_invoke.png)
-![A reaped embed, presented as readable text](ss/reap.png)
+![AI asking for permissions to run command, then running it](assets/ss/ai_and_perms.png)
+![Reminder running out](assets/ss/reminder.png)
+![Leech invoking other bots slash command](assets/ss/slash_invoke.png)
+![A reaped embed, presented as readable text](assets/ss/reap.png)
 
 
 ## Status
