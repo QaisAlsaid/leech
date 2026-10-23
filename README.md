@@ -160,7 +160,7 @@ early-ish development:
 ## AI usage
 
 > [!NOTE]
-> This project was written using the help of [Z](https://z.ai]), and was audited by me.
+> This project was written by me using the help of [Z](https://z.ai]) and was audited by me.
 
 ## License
 [MIT License](LICENSE)
