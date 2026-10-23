@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -24,13 +23,18 @@ from leech.core.command.runtime import Argument, Command
 from leech.core.command.invocation import Invocation
 from leech.core.parser.types.registry import Types, TypesRegistry
 from leech.core.error import BaseError
+from leech.core.store import Store, get_store, StoreError
 
 _logger = logging.getLogger(__name__)
 
 HUB_URL = (os.getenv("LEECH_HUB_URL") or "").strip().rstrip("/")
 HUB_TOKEN = (os.getenv("LEECH_HUB_TOKEN") or "").strip()
-COLAB_URL = (os.getenv("LEECH_YT_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
-COLAB_TOKEN = (os.getenv("LEECH_YT_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or "").strip()
+COLAB_URL = (
+    (os.getenv("LEECH_YT_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
+)
+COLAB_TOKEN = (
+    os.getenv("LEECH_YT_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or ""
+).strip()
 PROVIDERS_ENV = (os.getenv("LEECH_YT_PROVIDERS") or "colab,hub").strip()
 # v9: the built-in lane order flipped to colab-first. the hub runner kept
 # bot-check-failing on youtube (datacenter ip) so every job paid the
@@ -43,7 +47,11 @@ POLL_SECS = 2.5
 PROGRESS_MIN_SECS = 3.0
 REPLY_LIMIT = 1990
 COOKIE_PATH = Path("persistent/v1/ytdlp/cookies.txt")
-PREFS_PATH = Path("persistent/v1/ytdlp/prefs.json")
+
+# v11: prefs ride the store (doc ns `ytdlp_prefs`, {key: value} - the
+# shape migrate_persistent.py imports prefs.json as). cookies stay a
+# local file: yt-dlp reads it directly and it should not live in a db.
+NS_YT_PREFS = "ytdlp_prefs"
 COOKIE_MAX_BYTES = 200_000
 # v9: finished files <= this get re-uploaded as a real discord attachment
 # (inline player, the notsobot .dl behavior). bigger ones stay links -
@@ -71,16 +79,19 @@ def _parse_seconds(raw: str) -> float:
     try:
         numbers = [float(p) for p in parts]
     except ValueError:
-        raise CogError(f"`{raw}` isn't a time. use seconds (67) or mm:ss (1:67).",
-                       is_user_error=True)
+        raise CogError(
+            f"`{raw}` isn't a time. use seconds (67) or mm:ss (1:67).",
+            is_user_error=True,
+        )
     if not numbers or len(numbers) > 3 or any(n < 0 for n in numbers):
-        raise CogError(f"`{raw}` isn't a time. use seconds (67) or mm:ss (1:67).",
-                       is_user_error=True)
+        raise CogError(
+            f"`{raw}` isn't a time. use seconds (67) or mm:ss (1:67).",
+            is_user_error=True,
+        )
     seconds = 0.0
     for number in numbers:
         seconds = seconds * 60 + number
     return seconds
-
 
 
 def _validate_cookie_text(data: bytes) -> tuple[str, int, int]:
@@ -88,15 +99,16 @@ def _validate_cookie_text(data: bytes) -> tuple[str, int, int]:
         raise CogError(
             f"that file is {len(data) // 1000}kb - the cap is "
             f"{COOKIE_MAX_BYTES // 1000}kb. export fewer sites (youtube only).",
-            is_user_error=True)
+            is_user_error=True,
+        )
     try:
         text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
-        raise CogError("cookies.txt must be plain text (utf-8).",
-                       is_user_error=True)
+        raise CogError("cookies.txt must be plain text (utf-8).", is_user_error=True)
     if "\x00" in text:
-        raise CogError("that file has null bytes in it - not a cookies.txt.",
-                       is_user_error=True)
+        raise CogError(
+            "that file has null bytes in it - not a cookies.txt.", is_user_error=True
+        )
     lines = 0
     domains = set()
     for line in text.splitlines():
@@ -112,10 +124,12 @@ def _validate_cookie_text(data: bytes) -> tuple[str, int, int]:
         raise CogError(
             "no valid cookie lines found - netscape format is 7 columns "
             "separated by TABs. export with a 'Get cookies.txt' extension.",
-            is_user_error=True)
+            is_user_error=True,
+        )
     if not any("youtube" in d or "google" in d or "yt" == d for d in domains):
-        _logger.warning("cookie file has no youtube/google rows (domains=%d)",
-                        len(domains))
+        _logger.warning(
+            "cookie file has no youtube/google rows (domains=%d)", len(domains)
+        )
     if not text.endswith("\n"):
         text += "\n"
     return text, lines, len(domains)
@@ -159,43 +173,46 @@ class _CookieStore:
             return None
         if not text:
             return None
-        lines = sum(1 for line in text.splitlines()
-                    if line.strip() and not line.strip().startswith("#")
-                    and line.count("\t") >= 6)
-        return {"size": stat.st_size, "lines": lines,
-                "age_s": max(0, int(time.time() - stat.st_mtime))}
+        lines = sum(
+            1
+            for line in text.splitlines()
+            if line.strip()
+            and not line.strip().startswith("#")
+            and line.count("\t") >= 6
+        )
+        return {
+            "size": stat.st_size,
+            "lines": lines,
+            "age_s": max(0, int(time.time() - stat.st_mtime)),
+        }
 
 
 class _PrefStore:
-    """v9: tiny persisted prefs (the `>ytdlp default` lane pin). same
-    atomic-write pattern as the cookie store; one key, one file."""
+    """v9: tiny persisted prefs (the `>ytdlp default` lane pin).
+    v11: rides the store's `ytdlp_prefs` doc ns, so LEECH_STORE=supabase
+    carries it like everything else. same never-fail-a-command rule."""
 
-    def __init__(self, path: Path = PREFS_PATH):
-        self._path = path
-        self._lock = threading.Lock()
+    def __init__(self, store: Store | None = None):
+        self._store = store or get_store()
 
     def get(self, key: str, default: str = "") -> str:
-        with self._lock:
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return default
-            return str(data.get(key) or default)
+        try:
+            data = self._store.get_doc(NS_YT_PREFS)
+        except StoreError:
+            return default
+        if not isinstance(data, dict):
+            return default
+        return str(data.get(key) or default)
 
     def set(self, key: str, value: str) -> None:
-        with self._lock:
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+        try:
+            data = self._store.get_doc(NS_YT_PREFS)
+            if not isinstance(data, dict):
                 data = {}
             data[key] = value
-            try:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self._path.with_suffix(".json.temp")
-                tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                os.replace(tmp, self._path)
-            except OSError:
-                pass  # pref is cosmetic - never fail a command over it
+            self._store.put_doc(NS_YT_PREFS, data)
+        except StoreError:
+            pass  # pref is cosmetic - never fail a command over it
 
 
 class _HubLane:
@@ -212,16 +229,16 @@ class _HubLane:
         try:
             if method == "GET":
                 resp = await self._http.get(
-                    HUB_URL + path, headers={"x-leech-token": HUB_TOKEN})
+                    HUB_URL + path, headers={"x-leech-token": HUB_TOKEN}
+                )
             else:
                 resp = await self._http.post(
-                    HUB_URL + path, json=body,
-                    headers={"x-leech-token": HUB_TOKEN})
+                    HUB_URL + path, json=body, headers={"x-leech-token": HUB_TOKEN}
+                )
         except httpx.HTTPError as exc:
             raise _LaneFail("hub", f"leech-hub unreachable ({type(exc).__name__})")
         if resp.status_code == 401:
-            raise _LaneFail("hub", "the hub rejected the token "
-                                   "(LEECH_HUB_TOKEN).")
+            raise _LaneFail("hub", "the hub rejected the token " "(LEECH_HUB_TOKEN).")
         if resp.status_code != 200:
             try:
                 detail = str(resp.json()["error"])
@@ -237,8 +254,9 @@ class _HubLane:
         return data
 
     async def submit(self, payload: dict) -> str:
-        data = await self._api("POST", "/api/jobs",
-                               body={"kind": "yt", "payload": payload})
+        data = await self._api(
+            "POST", "/api/jobs", body={"kind": "yt", "payload": payload}
+        )
         return str(data["job"])
 
     async def view(self, job_id: str) -> dict:
@@ -259,9 +277,12 @@ class _HubLane:
                 label += f": {progress['note']}"
         else:
             label = state
-        return {"status": state, "label": label,
-                "result": job.get("result") or {},
-                "error": job.get("error")}
+        return {
+            "status": state,
+            "label": label,
+            "result": job.get("result") or {},
+            "error": job.get("error"),
+        }
 
     async def health(self) -> dict:
         return await self._api("GET", "/api/health")
@@ -283,29 +304,35 @@ class _ColabLane:
             headers["x-leech-token"] = COLAB_TOKEN
         return headers
 
-    async def _call(self, method: str, path: str,
-                    json_body: dict | None = None) -> httpx.Response:
+    async def _call(
+        self, method: str, path: str, json_body: dict | None = None
+    ) -> httpx.Response:
         try:
             if method == "GET":
-                return await self._http.get(COLAB_URL + path,
-                                            headers=self._headers())
-            return await self._http.post(COLAB_URL + path, json=json_body,
-                                         headers=self._headers())
+                return await self._http.get(COLAB_URL + path, headers=self._headers())
+            return await self._http.post(
+                COLAB_URL + path, json=json_body, headers=self._headers()
+            )
         except httpx.HTTPError as exc:
-            raise _LaneFail("colab", f"the manager is unreachable "
-                                     f"({type(exc).__name__}) - is the colab "
-                                     f"notebook running?")
+            raise _LaneFail(
+                "colab",
+                f"the manager is unreachable "
+                f"({type(exc).__name__}) - is the colab "
+                f"notebook running?",
+            )
 
     async def submit(self, payload: dict) -> str:
-        response = await self._call("POST", "/api/jobs",
-                                    {"kind": "yt", "payload": payload})
+        response = await self._call(
+            "POST", "/api/jobs", {"kind": "yt", "payload": payload}
+        )
         if response.status_code == 401:
-            raise _LaneFail("colab", "token rejected. LEECH_YT_TOKEN vs the "
-                                     "manager's TOKEN.")
+            raise _LaneFail(
+                "colab", "token rejected. LEECH_YT_TOKEN vs the " "manager's TOKEN."
+            )
         if response.status_code == 400:
             try:
                 detail = str(response.json().get("detail") or "?")
-            except Exception: 
+            except Exception:
                 detail = "?"
             raise _LaneFail("colab", detail)
         if response.status_code >= 400:
@@ -321,8 +348,9 @@ class _ColabLane:
     async def view(self, job_id: str) -> dict:
         response = await self._call("GET", f"/api/jobs/{job_id}")
         if response.status_code == 404:
-            raise _LaneFail("colab", "job gone - maybe it expired "
-                                     "(older than a day).")
+            raise _LaneFail(
+                "colab", "job gone - maybe it expired " "(older than a day)."
+            )
         if response.status_code >= 400:
             raise _LaneFail("colab", f"manager said {response.status_code}.")
         try:
@@ -337,9 +365,12 @@ class _ColabLane:
             label = str(view["stage"])
         else:
             label = state
-        return {"status": state, "label": label,
-                "result": view.get("result") or {},
-                "error": view.get("error")}
+        return {
+            "status": state,
+            "label": label,
+            "result": view.get("result") or {},
+            "error": view.get("error"),
+        }
 
     async def health(self) -> dict:
         response = await self._call("GET", "/api/status")
@@ -371,7 +402,8 @@ class _ColabLane:
     async def drain(self, kill_inflight: bool) -> dict:
         """v10.6: cancel every queued manager job (tts + yt)."""
         response = await self._call(
-            "POST", "/api/queue/drain", {"kill_inflight": kill_inflight})
+            "POST", "/api/queue/drain", {"kill_inflight": kill_inflight}
+        )
         if response.status_code == 401:
             raise _LaneFail("colab", "token rejected (LEECH_YT_TOKEN).")
         if response.status_code >= 400:
@@ -383,14 +415,14 @@ class _ColabLane:
 
     async def wake(self, gpu: bool = False) -> dict:
         """ask the manager to wake the kaggle kernel right now (v6)."""
-        response = await self._call(
-            "POST", "/api/wake", {"force": True, "gpu": gpu})
+        response = await self._call("POST", "/api/wake", {"force": True, "gpu": gpu})
         if response.status_code == 401:
             raise _LaneFail("colab", "token rejected (LEECH_YT_TOKEN).")
         if response.status_code >= 400:
             try:
-                detail = str(response.json().get("detail") or
-                             response.json().get("error") or "?")
+                detail = str(
+                    response.json().get("detail") or response.json().get("error") or "?"
+                )
             except Exception:  # noqa: BLE001
                 detail = f"manager said {response.status_code}."
             raise _LaneFail("colab", detail)
@@ -424,8 +456,9 @@ def _provider_order(forced: Optional[str], pinned: str = "") -> list[str]:
         name = name.strip().lower()
         if name in _LANES and name not in order:
             order.append(name)
-    return [name for name in order if _lane_env_ok(name)] or \
-           [name for name in ("hub", "colab") if _lane_env_ok(name)]
+    return [name for name in order if _lane_env_ok(name)] or [
+        name for name in ("hub", "colab") if _lane_env_ok(name)
+    ]
 
 
 class YtdlpCog(Cog):
@@ -439,8 +472,9 @@ class YtdlpCog(Cog):
             return
         self.context.add_on_load(self.load)
         self.context.add_on_unload(self.shutdown)
-        self.lanes = {name: factory()
-                      for name, factory in _LANES.items() if _lane_env_ok(name)}
+        self.lanes = {
+            name: factory() for name, factory in _LANES.items() if _lane_env_ok(name)
+        }
         self.cookies = _CookieStore()
         self.prefs = _PrefStore()
 
@@ -650,14 +684,13 @@ class YtdlpCog(Cog):
                     ],
                     subcommands={},
                     binding=NativeBinding(handler=self.cookies_handler),
-                    elevated=True
+                    elevated=True,
                 ),
             },
             binding=NativeBinding(handler=self.yt_handler),
         )
         if not self.context.add_command(root.name, root):
             raise CogError(f"i failed to load '{root.name}' ytdlp command.")
-
 
     async def _reply(self, message: discord.Message, text: str) -> discord.Message:
         return await message.reply(
@@ -679,8 +712,9 @@ class YtdlpCog(Cog):
             text = None
         return {"cookies": text} if text else {}
 
-    async def _await_lane(self, lane, job_id: str, note: str,
-                          status: discord.Message) -> dict:
+    async def _await_lane(
+        self, lane, job_id: str, note: str, status: discord.Message
+    ) -> dict:
         shown = ""
         last_edit = 0.0
         deadline = time.monotonic() + TIMEOUT
@@ -693,8 +727,9 @@ class YtdlpCog(Cog):
                     raise _LaneFail(lane.name, "finished but sent no link 😟")
                 return result
             if state == "error":
-                raise _LaneFail(lane.name, str(view.get("error") or
-                                               "the job failed on the lane."))
+                raise _LaneFail(
+                    lane.name, str(view.get("error") or "the job failed on the lane.")
+                )
             label = f"{note} - {lane.name}: {view['label']}"
             now = time.monotonic()
             if label != shown and now - last_edit >= PROGRESS_MIN_SECS:
@@ -704,7 +739,8 @@ class YtdlpCog(Cog):
                 raise _LaneFail(
                     lane.name,
                     f"still working after {TIMEOUT / 60:.0f}min (the job "
-                    f"({job_id}) keeps running in the cloud)")
+                    f"({job_id}) keeps running in the cloud)",
+                )
             await asyncio.sleep(POLL_SECS)
 
     # ------------------------------------------------------------- handlers
@@ -716,12 +752,13 @@ class YtdlpCog(Cog):
 
         forced = str(invocation.arguments.get("provider") or "").strip().lower()
         if forced and not _PROVIDER_RE.match(forced):
-            raise CogError("provider must be hub or colab.",
-                           is_user_error=True)
+            raise CogError("provider must be hub or colab.", is_user_error=True)
         order = _provider_order(forced, self.prefs.get("default_lane"))
         if not order:
-            raise YtError("no yt lane is configured - ask qais to fix leech "
-                          "(LEECH_HUB_* / LEECH_YT_*).")
+            raise YtError(
+                "no yt lane is configured - ask qais to fix leech "
+                "(LEECH_HUB_* / LEECH_YT_*)."
+            )
 
         payload: dict[str, Any] = {"url": url}
         audio = invocation.arguments.get("audio") or None
@@ -732,38 +769,41 @@ class YtdlpCog(Cog):
             try:
                 quality = int(str(quality))
             except ValueError:
-                raise CogError("quality must be a number like 720.",
-                               is_user_error=True)
+                raise CogError("quality must be a number like 720.", is_user_error=True)
             if not 144 <= quality <= 2160:
                 raise CogError(
-                    "quality must be between 144 and 2160 pixels.",
-                    is_user_error=True)
+                    "quality must be between 144 and 2160 pixels.", is_user_error=True
+                )
             payload["quality"] = quality
         max_mb = invocation.arguments.get("max_mb") or None
         if max_mb:
             try:
                 max_mb = float(max_mb)
             except (TypeError, ValueError):
-                raise CogError("max_mb must be a number like 50.",
-                               is_user_error=True)
+                raise CogError("max_mb must be a number like 50.", is_user_error=True)
             if max_mb < 1:
-                raise CogError("max_mb must be at least 1mb.",
-                               is_user_error=True)
+                raise CogError("max_mb must be at least 1mb.", is_user_error=True)
             payload["max_mb"] = min(max_mb, MAX_MB)
         for name in ("start", "end"):
             raw = str(invocation.arguments.get(name) or "").strip()
             if raw:
                 payload[name] = _parse_seconds(raw)
-        if "start" in payload and "end" in payload \
-                and payload["end"] <= payload["start"]:
+        if (
+            "start" in payload
+            and "end" in payload
+            and payload["end"] <= payload["start"]
+        ):
             raise CogError(
-                "invalid clip 'end' has to be after 'start'.",
-                is_user_error=True)
+                "invalid clip 'end' has to be after 'start'.", is_user_error=True
+            )
         payload.update(self._cookie_payload())
         payload["requested_by"] = invocation.message.author.id
 
-        note = "yt: audio (mp3)" if payload.get("audio") else \
-               f"yt: video ({payload.get('quality') or 720}p)"
+        note = (
+            "yt: audio (mp3)"
+            if payload.get("audio")
+            else f"yt: video ({payload.get('quality') or 720}p)"
+        )
 
         status_msg = await self._reply(invocation.message, f"{note} - queued...")
         failures: list[tuple[str, str]] = []
@@ -784,7 +824,8 @@ class YtdlpCog(Cog):
                     await self._edit(
                         status_msg,
                         f"{note} - {lane_name} failed "
-                        f"({exc.message[:120]}) - trying {order[index + 1]}...")
+                        f"({exc.message[:120]}) - trying {order[index + 1]}...",
+                    )
                 continue
             await self._deliver(invocation, status_msg, result, lane_name)
             return
@@ -799,15 +840,16 @@ class YtdlpCog(Cog):
             pinned = self.prefs.get("default_lane") or "auto"
             order = _provider_order(None, self.prefs.get("default_lane"))
             trail = " -> ".join(order) if order else "none configured"
-            await self._reply(invocation.message,
-                              f"default lane: **{pinned}** · try order: {trail}")
+            await self._reply(
+                invocation.message, f"default lane: **{pinned}** · try order: {trail}"
+            )
             return
         if raw not in ("colab", "hub", "auto"):
-            raise CogError("lane must be colab, hub or auto.",
-                           is_user_error=True)
+            raise CogError("lane must be colab, hub or auto.", is_user_error=True)
         if raw in ("hub", "colab") and self.lanes.get(raw) is None:
-            raise CogError(f"the {raw} lane isn't configured on this bot.",
-                           is_user_error=True)
+            raise CogError(
+                f"the {raw} lane isn't configured on this bot.", is_user_error=True
+            )
         self.prefs.set("default_lane", raw)
         order = _provider_order(None, raw)
         trail = " -> ".join(order) if order else "none configured"
@@ -832,23 +874,29 @@ class YtdlpCog(Cog):
                         state = f"armed ({runner.get('repo') or '?'})"
                     else:
                         state = "dispatch off - janitor sweeps every 15 min"
-                    lines.append(f"hub    queued: {health.get('queue_depth', 0)}"
-                                 f" · runner: {state}")
+                    lines.append(
+                        f"hub    queued: {health.get('queue_depth', 0)}"
+                        f" · runner: {state}"
+                    )
                 else:
                     page = await lane.health()
-                    workers = [w for w in (page.get("workers") or [])
-                               if isinstance(w, dict)]
+                    workers = [
+                        w for w in (page.get("workers") or []) if isinstance(w, dict)
+                    ]
                     if workers:
                         who = "; ".join(
                             f"{w.get('id') or '?'}"
                             + (f", {w.get('gpu')}" if w.get("gpu") else "")
                             + f" ({w.get('last_seen_ago', '?')}s ago)"
-                            for w in workers[:4])
+                            for w in workers[:4]
+                        )
                     else:
                         who = "none - start the colab notebook or >ytdlp wake"
-                    lines.append(f"colab  queued: {page.get('queued', 0)}"
-                                 f" · inflight: {page.get('inflight', 0)}"
-                                 f" · workers: {who}")
+                    lines.append(
+                        f"colab  queued: {page.get('queued', 0)}"
+                        f" · inflight: {page.get('inflight', 0)}"
+                        f" · workers: {who}"
+                    )
                     kaggle = page.get("kaggle") or {}
                     if kaggle.get("configured"):
                         bits = [f"kernel {kaggle.get('kernel') or '?'}"]
@@ -873,21 +921,30 @@ class YtdlpCog(Cog):
                     elif kaggle:
                         missing = ", ".join(kaggle.get("missing") or ["?"])
                         lines.append(f"kaggle off (missing: {missing[:70]})")
-                    kworkers = [w for w in (page.get("workers") or [])
-                                if isinstance(w, dict)
-                                and str(w.get("id") or "").startswith("kaggle")]
+                    kworkers = [
+                        w
+                        for w in (page.get("workers") or [])
+                        if isinstance(w, dict)
+                        and str(w.get("id") or "").startswith("kaggle")
+                    ]
                     if kworkers:
-                        lines.append("        (a kaggle kernel is alive and "
-                                     "checking in right now)")
+                        lines.append(
+                            "        (a kaggle kernel is alive and "
+                            "checking in right now)"
+                        )
             except _LaneFail as exc:
                 lines.append(f"{name:6s}  unreachable - {exc.message[:100]}")
         cookie = self.cookies.stats()
         if cookie:
-            lines.append(f"cookies: {cookie['lines']} lines, "
-                         f"{cookie['age_s'] // 3600}h old - sent on every job")
+            lines.append(
+                f"cookies: {cookie['lines']} lines, "
+                f"{cookie['age_s'] // 3600}h old - sent on every job"
+            )
         pinned = self.prefs.get("default_lane") or "auto"
-        lines.append(f"default lane: {pinned}"
-                     + ("" if pinned == "auto" else "  (>ytdlp default lane=auto to reset)"))
+        lines.append(
+            f"default lane: {pinned}"
+            + ("" if pinned == "auto" else "  (>ytdlp default lane=auto to reset)")
+        )
         lines.append("```")
         await self._reply(invocation.message, "\n".join(lines))
 
@@ -908,12 +965,14 @@ class YtdlpCog(Cog):
             await self._reply(
                 invocation.message,
                 f"job `{result.get('id') or ident}` already finished "
-                f"({result['already']}) - nothing to kill.")
+                f"({result['already']}) - nothing to kill.",
+            )
             return
         await self._reply(
             invocation.message,
             f"cancelled `[{result.get('kind') or '?'}]` job "
-            f"`{result.get('id') or ident}` 😁")
+            f"`{result.get('id') or ident}` 😁",
+        )
 
     async def drain_handler(self, invocation: Invocation):
         """v10.6: empty the shared manager queue."""
@@ -934,19 +993,22 @@ class YtdlpCog(Cog):
             await self._reply(invocation.message, "the queue was already empty.")
             return
         note = f" (+{running} running job(s) cancelled)" if running else ""
-        await self._reply(
-            invocation.message, f"drained {killed} queued job(s){note}.")
+        await self._reply(invocation.message, f"drained {killed} queued job(s){note}.")
 
     async def wake_handler(self, invocation: Invocation):
         lane = self.lanes.get("colab")
         if lane is None:
-            raise CogError("wake needs the colab lane (LEECH_YT_URL / "
-                           "LEECH_YT_TOKEN on the bot).",
-                           is_user_error=True)
+            raise CogError(
+                "wake needs the colab lane (LEECH_YT_URL / "
+                "LEECH_YT_TOKEN on the bot).",
+                is_user_error=True,
+            )
         gpu = bool(invocation.arguments.get("gpu"))
-        await self._reply(invocation.message,
-                          f"waking kaggle ({'gpu' if gpu else 'cpu'}) - "
-                          "the kernel takes ~2-5 min to boot...")
+        await self._reply(
+            invocation.message,
+            f"waking kaggle ({'gpu' if gpu else 'cpu'}) - "
+            "the kernel takes ~2-5 min to boot...",
+        )
         try:
             info = await lane.wake(gpu=gpu)
         except _LaneFail as exc:
@@ -958,12 +1020,11 @@ class YtdlpCog(Cog):
                 invocation.message,
                 f"kernel pushed (version {version}, "
                 f"{'gpu' if info.get('gpu') else 'cpu'}) - it will check in "
-                "as a worker within a few minutes. `>ytdlp queue` to watch.")
+                "as a worker within a few minutes. `>ytdlp queue` to watch.",
+            )
             return
         reason = str(info.get("reason") or info.get("error") or "?")
-        await self._reply(
-            invocation.message,
-            f"wake: {state} - {reason[:300]}")
+        await self._reply(invocation.message, f"wake: {state} - {reason[:300]}")
 
     async def cookies_handler(self, invocation: Invocation):
         action = str(invocation.arguments.get("action") or "").strip().lower()
@@ -971,13 +1032,19 @@ class YtdlpCog(Cog):
             cleared = self.cookies.clear()
             await self._reply(
                 invocation.message,
-                "cookie file forgotten" if cleared else
-                "no cookie file was stored anyway.")
+                (
+                    "cookie file forgotten"
+                    if cleared
+                    else "no cookie file was stored anyway."
+                ),
+            )
             return
         if action:
-            raise CogError("the only cookies sub-action is `clear` - attach "
-                           "a cookies.txt to store one.",
-                           is_user_error=True)
+            raise CogError(
+                "the only cookies sub-action is `clear` - attach "
+                "a cookies.txt to store one.",
+                is_user_error=True,
+            )
 
         attachments = list(getattr(invocation.message, "attachments", []) or [])
         if not attachments:
@@ -988,21 +1055,25 @@ class YtdlpCog(Cog):
                     "no cookie file stored. attach a netscape cookies.txt "
                     "(export it with a 'Get cookies.txt' extension while "
                     "logged in on a BURNER account) to this command to "
-                    "store one - it rides every yt job to both lanes.")
+                    "store one - it rides every yt job to both lanes.",
+                )
             else:
                 await self._reply(
                     invocation.message,
                     f"cookies stored: {stats['lines']} lines, "
                     f"{stats['size'] // 1024}kb, "
                     f"{stats['age_s'] // 3600}h old - sent on every yt job "
-                    "to hub and colab. `>ytdlp cookies clear` forgets it.")
+                    "to hub and colab. `>ytdlp cookies clear` forgets it.",
+                )
             return
 
         attachment = attachments[0]
         if attachment.size and attachment.size > COOKIE_MAX_BYTES:
             raise CogError(
                 f"that file is {attachment.size // 1000}kb - the cap is "
-                f"{COOKIE_MAX_BYTES // 1000}kb.", is_user_error=True)
+                f"{COOKIE_MAX_BYTES // 1000}kb.",
+                is_user_error=True,
+            )
         try:
             data = await attachment.read()
         except discord.HTTPException as exc:
@@ -1013,77 +1084,81 @@ class YtdlpCog(Cog):
             invocation.message,
             f"cookies stored {lines} lines across {domains} domains - "
             "every yt job carries them youtube logins expire, so "
-            "re-export when downloads start failing again. (burner account).")
+            "re-export when downloads start failing again. (burner account).",
+        )
 
-    async def _deliver(self, invocation: Invocation, status: discord.Message, result: dict, lane_name: str):
-          url = str(result.get("url") or "")
-          if not url:
+    async def _deliver(
+        self,
+        invocation: Invocation,
+        status: discord.Message,
+        result: dict,
+        lane_name: str,
+    ):
+        url = str(result.get("url") or "")
+        if not url:
             await self._fail(status, "the lane finished but sent no link 😟")
             return
 
-          # v9: files small enough for discord ride back as real
-          # attachments - inline video/audio player, the notsobot .dl
-          # behavior. big ones stay links (a user line is ~10mb).
-          data = await self._fetch_for_attach(url, result)
+        # v9: files small enough for discord ride back as real
+        # attachments - inline video/audio player, the notsobot .dl
+        # behavior. big ones stay links (a user line is ~10mb).
+        data = await self._fetch_for_attach(url, result)
 
-          size = result.get("size_mb")
-          if size is None and result.get("size"):
+        size = result.get("size_mb")
+        if size is None and result.get("size"):
             try:
-              size = round(float(result["size"]) / 1e6, 1)
+                size = round(float(result["size"]) / 1e6, 1)
             except (TypeError, ValueError):
-              size = None
+                size = None
 
-          title = str(result.get("title") or "download")[:250]
-          webpage_url = str(result.get("webpage_url") or url)
-          uploader = str(result.get("uploader"))[:100] if result.get("uploader") else None
+        title = str(result.get("title") or "download")[:250]
+        webpage_url = str(result.get("webpage_url") or url)
+        uploader = str(result.get("uploader"))[:100] if result.get("uploader") else None
 
-          size_str = f"{size}mb" if size is not None else "?mb"
-          format_str = (
-            result.get("format") or ("mp3" if result.get("audio") else "mp4")
-          )
-          duration_str = self._fmt_duration(result.get("duration"))
+        size_str = f"{size}mb" if size is not None else "?mb"
+        format_str = result.get("format") or ("mp3" if result.get("audio") else "mp4")
+        duration_str = self._fmt_duration(result.get("duration"))
 
-          lines = [f"**[{title}]({webpage_url})**"]
+        lines = [f"**[{title}]({webpage_url})**"]
 
-          if uploader:
+        if uploader:
             lines.append(f" {uploader}")
 
-          details = []
-          if size_str != "?mb":
+        details = []
+        if size_str != "?mb":
             details.append(size_str)
-          if format_str:
+        if format_str:
             details.append(str(format_str))
-          if duration_str:
+        if duration_str:
             details.append(duration_str)
 
-          if details:
+        if details:
             lines.append(" · ".join(details))
 
-          lines.append(f"leech · yt · {lane_name}")
-          lines.append(url)
+        lines.append(f"leech · yt · {lane_name}")
+        lines.append(url)
 
-          message_text = "\n".join(lines)
+        message_text = "\n".join(lines)
 
-          try:
+        try:
             await status.delete()
-          except (discord.HTTPException, TypeError):
+        except (discord.HTTPException, TypeError):
             pass
 
-          if data is not None:
+        if data is not None:
             await invocation.message.reply(
-              content=message_text,
-              file=discord.File(io.BytesIO(data),
-                                filename=self._attach_name(result)),
-              mention_author=False,
-              allowed_mentions=discord.AllowedMentions.none(),
+                content=message_text,
+                file=discord.File(io.BytesIO(data), filename=self._attach_name(result)),
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
-          await invocation.message.reply(
+        await invocation.message.reply(
             content=message_text,
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
-          )
+        )
 
     def _attach_name(self, result: dict) -> str:
         title = str(result.get("title") or "download")
@@ -1091,8 +1166,11 @@ class YtdlpCog(Cog):
         stem = stem.strip("._") or "download"
         url = str(result.get("url") or "")
         dot = url.rsplit("/", 1)[-1].rpartition(".")[2].lower()
-        ext = dot if dot in ("mp4", "mp3", "mkv", "webm", "m4a", "ogg", "wav") \
+        ext = (
+            dot
+            if dot in ("mp4", "mp3", "mkv", "webm", "m4a", "ogg", "wav")
             else ("mp3" if result.get("audio") else "mp4")
+        )
         return f"{stem}.{ext}"
 
     async def _fetch_for_attach(self, url: str, result: dict) -> Optional[bytes]:
@@ -1110,8 +1188,8 @@ class YtdlpCog(Cog):
             chunks: list[bytes] = []
             held = 0
             async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(240.0, connect=20.0),
-                    follow_redirects=True) as client:
+                timeout=httpx.Timeout(240.0, connect=20.0), follow_redirects=True
+            ) as client:
                 async with client.stream("GET", url) as resp:
                     resp.raise_for_status()
                     async for chunk in resp.aiter_bytes(64 * 1024):

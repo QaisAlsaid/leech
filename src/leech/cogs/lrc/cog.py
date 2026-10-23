@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import zipfile
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -21,27 +20,28 @@ from leech.core.command.native.binding import NativeBinding
 from leech.core.command.runtime import Argument, Command
 from leech.core.command.invocation import Invocation
 from leech.core.parser.types.registry import Types, TypesRegistry
+from leech.core.store import Store, get_store, StoreError
 from leech.core.error import BaseError
 import leech.core.helpers.text.paginator as paginator
 
 _logger = logging.getLogger(__name__)
 
 REPLY_LIMIT = 1990
-LIST_CAP = 10         
-ALBUM_TRACK_CAP = 60    
-VIEW_CHUNKS = 3      
-LYRICS_CONCURRENCY = 4  
-ATTACH_BATCH = 10       
+LIST_CAP = 10
+ALBUM_TRACK_CAP = 60
+VIEW_CHUNKS = 3
+LYRICS_CONCURRENCY = 4
+ATTACH_BATCH = 10
 
-SERVER_URL = (
-    os.getenv("LEECH_HUB_URL") or ""
-).strip().rstrip("/")
-SERVER_TOKEN = (
-    os.getenv("LEECH_HUB_TOKEN")
-    or ""
-).strip()
-MONO_BASE = (os.getenv("MONO_BASE") or "https://tracks.monochrome.st").strip().rstrip("/")
-CONFIG_STORE = Path("persistent/v1/lrc/lrc.json")
+SERVER_URL = (os.getenv("LEECH_HUB_URL") or "").strip().rstrip("/")
+SERVER_TOKEN = (os.getenv("LEECH_HUB_TOKEN") or "").strip()
+MONO_BASE = (
+    (os.getenv("MONO_BASE") or "https://tracks.monochrome.st").strip().rstrip("/")
+)
+
+# v11: lrc prefs ride the store as a doc ns (the whole {users: {...}}
+# object under one key - the shape migrate_persistent.py writes).
+NS_LRC = "lrc_config"
 
 _INDEX_RE = re.compile(r"^index=(\d+)$", re.IGNORECASE)
 _PREFER_RE = re.compile(r"^prefer=(synced|plain|lrc|txt)$", re.IGNORECASE)
@@ -77,7 +77,8 @@ def _parse_what(text: str) -> "tuple[str, int, Optional[str], Optional[bool]]":
         if token.lower().startswith(("index=", "prefer=", "zip=")):
             raise CogError(
                 f"didn't get `{token}` - it's index=N, "
-                "prefer=synced|plain and zip=on|off.", is_user_error=True,
+                "prefer=synced|plain and zip=on|off.",
+                is_user_error=True,
             )
         words.append(token)
     return " ".join(words).strip(), index, prefer, zip_override
@@ -99,7 +100,9 @@ def _norm_hit(raw: dict) -> dict:
         duration_s = 0
     return {
         "id": raw.get("id"),
-        "track": str(_pick_field(raw, "trackName", "track_name", "track", "title") or "?"),
+        "track": str(
+            _pick_field(raw, "trackName", "track_name", "track", "title") or "?"
+        ),
         "artist": str(_pick_field(raw, "artistName", "artist_name", "artist") or "?"),
         "album": _pick_field(raw, "albumName", "album_name", "album"),
         "duration_s": duration_s,
@@ -141,21 +144,28 @@ class _Hub:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def _api(self, method: str, path: str, params: dict | None = None,
-                   body: dict | None = None) -> dict:
+    async def _api(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        body: dict | None = None,
+    ) -> dict:
         try:
             if method == "GET":
                 resp = await self._http.get(
-                    SERVER_URL + path, params=params,
-                    headers={"x-leech-token": SERVER_TOKEN})
+                    SERVER_URL + path,
+                    params=params,
+                    headers={"x-leech-token": SERVER_TOKEN},
+                )
             else:
                 resp = await self._http.post(
-                    SERVER_URL + path, json=body,
-                    headers={"x-leech-token": SERVER_TOKEN})
+                    SERVER_URL + path,
+                    json=body,
+                    headers={"x-leech-token": SERVER_TOKEN},
+                )
         except httpx.HTTPError as exc:
-            raise LrcError(
-                f"leech-hub unreachable: {type(exc).__name__}"
-            ) from exc
+            raise LrcError(f"leech-hub unreachable: {type(exc).__name__}") from exc
         if resp.status_code == 401:
             raise LrcError(
                 "the leech-hub rejected the token "
@@ -173,9 +183,7 @@ class _Hub:
         try:
             data = resp.json()
         except json.JSONDecodeError as e:
-            raise LrcError(
-                f"the leech-hub returned invalid json, details: {e}"
-            ) from e
+            raise LrcError(f"the leech-hub returned invalid json, details: {e}") from e
         if not data.get("ok"):
             raise LrcError(str(data.get("error") or "unknown hub error"))
         return data
@@ -184,10 +192,14 @@ class _Hub:
         data = await self._api("GET", "/api/lyrics/search", params={"q": query})
         return list(data.get("data") or [])
 
-    async def lyrics_get(self, artist: str, track: str,
-                         album: Optional[str] = None,
-                         duration_s: Optional[int] = None,
-                         prefer: Optional[str] = None) -> dict:
+    async def lyrics_get(
+        self,
+        artist: str,
+        track: str,
+        album: Optional[str] = None,
+        duration_s: Optional[int] = None,
+        prefer: Optional[str] = None,
+    ) -> dict:
         params: dict = {"artist": artist, "track": track}
         if album:
             params["album"] = str(album)
@@ -206,7 +218,8 @@ class _Hub:
         """raw mono /search json - direct first, hub proxy as fallback."""
         try:
             resp = await self._http.get(
-                f"{MONO_BASE}/search", params={"q": query}, timeout=20.0)
+                f"{MONO_BASE}/search", params={"q": query}, timeout=20.0
+            )
             if resp.status_code == 200:
                 return resp.json()
         except (httpx.HTTPError, ValueError):
@@ -220,31 +233,43 @@ class _Hub:
 
 
 class _LrcConfig:
-    def __init__(self, store: Path = CONFIG_STORE):
-        self._store = store
+    def __init__(self, store: Store | None = None):
+        self._store = store or get_store()
+        self._broken = False  # failed load -> defaults, never a wipe
         self._users: dict[int, dict] = {}
         self._load()
 
     def _load(self) -> None:
         try:
-            data = json.loads(self._store.read_text(encoding="utf-8"))
-            raw = data.get("users", {}) if isinstance(data, dict) else {}
-            self._users = {
-                int(key): (value if isinstance(value, dict) else {})
-                for key, value in raw.items() if str(key).isdigit()
-            }
-        except (OSError, ValueError):
-            self._users = {}
+            data = self._store.get_doc(NS_LRC)
+        except StoreError as e:
+            self._broken = True
+            _logger.warning(
+                "lrc store unreadable (%s). starting empty; changes will "
+                "NOT be saved this session.",
+                e,
+            )
+            return
+        raw = data.get("users", {}) if isinstance(data, dict) else {}
+        self._users = {
+            int(key): (value if isinstance(value, dict) else {})
+            for key, value in raw.items()
+            if str(key).isdigit()
+        }
 
     def _persist(self) -> None:
+        if self._broken:
+            _logger.warning(
+                "lrc prefs NOT saved: the store failed to load this "
+                "session. restart once the store is reachable."
+            )
+            return
         try:
-            self._store.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._store.with_suffix(".json.temp")
-            tmp.write_text(
-                json.dumps({"users": {str(k): v for k, v in self._users.items()}}),
-                encoding="utf-8")
-            os.replace(tmp, self._store)
-        except OSError as exc:
+            self._store.put_doc(
+                NS_LRC,
+                {"users": {str(k): v for k, v in self._users.items()}},
+            )
+        except StoreError as exc:
             _logger.warning("lrc config not saved: %s", exc)
 
     def album_zip(self, user_id: int) -> bool:
@@ -253,12 +278,21 @@ class _LrcConfig:
 
     def set_album_zip(self, user_id: int, value: str) -> bool:
         text = str(value or "").strip().lower()
-        text = {"true": "on", "yes": "on", "1": "on", "zip": "on",
-                "false": "off", "no": "off", "0": "off",
-                "loose": "off"}.get(text, text)
+        text = {
+            "true": "on",
+            "yes": "on",
+            "1": "on",
+            "zip": "on",
+            "false": "off",
+            "no": "off",
+            "0": "off",
+            "loose": "off",
+        }.get(text, text)
         if text not in ("on", "off"):
-            raise LrcError("zip must be on or off - `>lrc config zip off` "
-                           "gets you the lyrics as loose files instead.")
+            raise LrcError(
+                "zip must be on or off - `>lrc config zip off` "
+                "gets you the lyrics as loose files instead."
+            )
         self._users.setdefault(int(user_id), {})["album_zip"] = text
         self._persist()
         return text == "on"
@@ -288,14 +322,16 @@ def _group(name: str, description: str, subcommands: dict) -> Command:
     )
 
 
-_QUERY_ARG = [Argument(
-    name="what",
-    description="the query, plus optional index=N, "
-                "prefer=synced|plain and zip=on|off.",
-    usage_example="what=opeth windowpane index=1",
-    type=TypesRegistry.require(Types.STR),
-    required=True,
-)]
+_QUERY_ARG = [
+    Argument(
+        name="what",
+        description="the query, plus optional index=N, "
+        "prefer=synced|plain and zip=on|off.",
+        usage_example="what=opeth windowpane index=1",
+        type=TypesRegistry.require(Types.STR),
+        required=True,
+    )
+]
 
 
 class LrcCog(Cog):
@@ -335,11 +371,7 @@ class LrcCog(Cog):
                 "the finals say which tracks came back empty."
             ),
             arguments=[],
-            subcommands=(
-                self.get_track()
-                | self.get_album()
-                | self.get_config()
-            ),
+            subcommands=(self.get_track() | self.get_album() | self.get_config()),
             binding=MockBinding(),
             is_root=True,
         )
@@ -350,61 +382,106 @@ class LrcCog(Cog):
 
     def get_track(self) -> dict[str, Command]:
         return {
-            "track": _group("track", "track lyrics.", {
-                "lyrics": _group("lyrics", "lyrics things.", {
-                    "search": _leaf(
-                        "search", "find lyrics by song name.",
-                        self.track_search_handler, _QUERY_ARG),
-                    "view": _leaf(
-                        "view", "print a track's lyrics in chat.",
-                        self.track_view_handler, _QUERY_ARG),
-                    "download": _leaf(
-                        "download", "get the .lrc/.txt as a file.",
-                        self.track_download_handler, _QUERY_ARG),
-                }),
-            })
+            "track": _group(
+                "track",
+                "track lyrics.",
+                {
+                    "lyrics": _group(
+                        "lyrics",
+                        "lyrics things.",
+                        {
+                            "search": _leaf(
+                                "search",
+                                "find lyrics by song name.",
+                                self.track_search_handler,
+                                _QUERY_ARG,
+                            ),
+                            "view": _leaf(
+                                "view",
+                                "print a track's lyrics in chat.",
+                                self.track_view_handler,
+                                _QUERY_ARG,
+                            ),
+                            "download": _leaf(
+                                "download",
+                                "get the .lrc/.txt as a file.",
+                                self.track_download_handler,
+                                _QUERY_ARG,
+                            ),
+                        },
+                    ),
+                },
+            )
         }
 
     def get_album(self) -> dict[str, Command]:
         return {
-            "album": _group("album", "album lyrics.", {
-                "lyrics": _group("lyrics", "lyrics things.", {
-                    "search": _leaf(
-                        "search", "an album's tracks + lyrics status.",
-                        self.album_search_handler, _QUERY_ARG),
-                    "view": _leaf(
-                        "view", "one track's lyrics (index picks the track).",
-                        self.album_view_handler, _QUERY_ARG),
-                    "download": _leaf(
-                        "download", "the album's lyrics: zip, or loose files.",
-                        self.album_download_handler, _QUERY_ARG),
-                }),
-            })
+            "album": _group(
+                "album",
+                "album lyrics.",
+                {
+                    "lyrics": _group(
+                        "lyrics",
+                        "lyrics things.",
+                        {
+                            "search": _leaf(
+                                "search",
+                                "an album's tracks + lyrics status.",
+                                self.album_search_handler,
+                                _QUERY_ARG,
+                            ),
+                            "view": _leaf(
+                                "view",
+                                "one track's lyrics (index picks the track).",
+                                self.album_view_handler,
+                                _QUERY_ARG,
+                            ),
+                            "download": _leaf(
+                                "download",
+                                "the album's lyrics: zip, or loose files.",
+                                self.album_download_handler,
+                                _QUERY_ARG,
+                            ),
+                        },
+                    ),
+                },
+            )
         }
 
     def get_config(self) -> dict[str, Command]:
         return {
-            "config": _group("config", "your lrc settings (per user).", {
-                "show": _leaf(
-                    "show", "show your settings.", self.config_show_handler),
-                "zip": _leaf(
-                    "zip", "album downloads: one zip, or loose files.",
-                    self.config_zip_handler,
-                    [Argument(
-                        name="value",
-                        description="'on' (one zip, default) or 'off' "
-                                    "(the lyrics as individual files).",
-                        usage_example="value=off",
-                        type=TypesRegistry.require(Types.STR),
-                        required=True,
-                    )]),
-                "reset": _leaf(
-                    "reset", "back to defaults.", self.config_reset_handler),
-            })
+            "config": _group(
+                "config",
+                "your lrc settings (per user).",
+                {
+                    "show": _leaf(
+                        "show", "show your settings.", self.config_show_handler
+                    ),
+                    "zip": _leaf(
+                        "zip",
+                        "album downloads: one zip, or loose files.",
+                        self.config_zip_handler,
+                        [
+                            Argument(
+                                name="value",
+                                description="'on' (one zip, default) or 'off' "
+                                "(the lyrics as individual files).",
+                                usage_example="value=off",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
+                    ),
+                    "reset": _leaf(
+                        "reset", "back to defaults.", self.config_reset_handler
+                    ),
+                },
+            )
         }
 
-    async def _reply(self, message: discord.Message, text: str,
-                     file: "discord.File | None" = None) -> discord.Message:
+    async def _reply(
+        self, message: discord.Message, text: str, file: "discord.File | None" = None
+    ) -> discord.Message:
         return await message.reply(
             text[:REPLY_LIMIT],
             file=file,
@@ -412,8 +489,9 @@ class LrcCog(Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def _reply_files(self, message: discord.Message, text: str,
-                           files: list[discord.File]) -> discord.Message:
+    async def _reply_files(
+        self, message: discord.Message, text: str, files: list[discord.File]
+    ) -> discord.Message:
         """discord caps a message at 10 attachments - callers batch."""
         return await message.reply(
             text[:REPLY_LIMIT],
@@ -425,13 +503,16 @@ class LrcCog(Cog):
     async def _send_lines(self, message: discord.Message, lines: list[str]) -> None:
         payload = "\n".join(lines)
         # v10.9: one paginated message instead of a splitter chunk spam.
-        await paginator.paginate(
-            message, payload, client=self.context.client
-        )
+        await paginator.paginate(message, payload, client=self.context.client)
 
-    async def _send_code_chunks(self, message: discord.Message, head: str,
-                                text: str, note: str,
-                                download_hint: str) -> None:
+    async def _send_code_chunks(
+        self,
+        message: discord.Message,
+        head: str,
+        text: str,
+        note: str,
+        download_hint: str,
+    ) -> None:
         lines = text.splitlines()
         chunks: list[str] = []
         current: list[str] = []
@@ -450,7 +531,8 @@ class LrcCog(Cog):
             head_line = f"{head} {note}" if first else f"{head} (cont.)"
             first = False
             target = await self._reply(
-                target, f"{head_line}\n```\n{chunk[:REPLY_LIMIT - 40]}\n```")
+                target, f"{head_line}\n```\n{chunk[:REPLY_LIMIT - 40]}\n```"
+            )
         if len(chunks) > VIEW_CHUNKS:
             await self._reply(
                 target,
@@ -462,9 +544,9 @@ class LrcCog(Cog):
         hits = [_norm_hit(item) for item in raw if isinstance(item, dict)]
         return [hit for hit in hits if hit["track"] != "?"]
 
-    async def _track_lyrics(self, query: str, index: int,
-                            prefer: Optional[str]
-                            ) -> "tuple[dict, dict, Optional[str]]":
+    async def _track_lyrics(
+        self, query: str, index: int, prefer: Optional[str]
+    ) -> "tuple[dict, dict, Optional[str]]":
         hits = await self._hits(query)
         if not hits:
             raise LrcError(f"no lyrics results for {query!r}.")
@@ -476,13 +558,14 @@ class LrcCog(Cog):
         if hit["instrumental"]:
             raise LrcError(f"{hit['track']} is marked instrumental (no lyrics).")
         lyrics = await self.hub.lyrics_get(
-            hit["artist"], hit["track"], hit.get("album"),
-            hit.get("duration_s"), prefer)
+            hit["artist"], hit["track"], hit.get("album"), hit.get("duration_s"), prefer
+        )
         return hit, lyrics, hit.get("plain_text")
 
     @staticmethod
-    def _track_texts(lyrics: dict, fallback_plain: Optional[str],
-                     prefer: str) -> "tuple[Optional[str], str]":
+    def _track_texts(
+        lyrics: dict, fallback_plain: Optional[str], prefer: str
+    ) -> "tuple[Optional[str], str]":
         synced = lyrics.get("synced")
         plain = lyrics.get("plain") or fallback_plain
         return _pick_text(synced, plain, prefer)
@@ -493,14 +576,14 @@ class LrcCog(Cog):
             return "instrumental"
         if hit.get("plain_text"):
             return "plain"
-        return "lrc?"   
+        return "lrc?"
 
     async def track_search_handler(self, invocation: Invocation):
         query, _, _, _ = _parse_what(invocation.arguments["what"])
         if not query:
             raise CogError(
-                "give me something to search - "
-                "`>lrc track lyrics search <name>`.", is_user_error=True,
+                "give me something to search - " "`>lrc track lyrics search <name>`.",
+                is_user_error=True,
             )
         hits = await self._hits(query)
         if not hits:
@@ -517,8 +600,10 @@ class LrcCog(Cog):
             lines.append(text)
         if len(hits) > LIST_CAP:
             lines.append(f"...(+{len(hits) - LIST_CAP} more)")
-        lines.append("pick one: `>lrc track lyrics view <query> index=N` "
-                     "(index defaults to 0)")
+        lines.append(
+            "pick one: `>lrc track lyrics view <query> index=N` "
+            "(index defaults to 0)"
+        )
         await self._send_lines(invocation.message, lines)
 
     async def track_view_handler(self, invocation: Invocation):
@@ -526,23 +611,24 @@ class LrcCog(Cog):
         if not query:
             raise CogError(
                 "give me something to view - "
-                "`>lrc track lyrics view <name> index=N`.", is_user_error=True,
+                "`>lrc track lyrics view <name> index=N`.",
+                is_user_error=True,
             )
-        hit, lyrics, fallback_plain = await self._track_lyrics(
-            query, index, prefer)
+        hit, lyrics, fallback_plain = await self._track_lyrics(query, index, prefer)
         want = prefer or "plain"
         text, kind = self._track_texts(lyrics, fallback_plain, want)
         if not text:
-            raise LrcError(
-                f"{hit['track']} - no lyrics i could pull for that one 😟"
-            )
+            raise LrcError(f"{hit['track']} - no lyrics i could pull for that one 😟")
         head = f"**{hit['track']}** - {hit['artist']}"
         if hit.get("album"):
             head += f" · {hit['album']}"
         if hit.get("duration_s"):
             head += f" · {_fmt_secs(hit['duration_s'])}"
         await self._send_code_chunks(
-            invocation.message, head, text, f"· {kind} · hit {index}",
+            invocation.message,
+            head,
+            text,
+            f"· {kind} · hit {index}",
             f"use `>lrc track lyrics download {query} index={index}`",
         )
 
@@ -554,14 +640,11 @@ class LrcCog(Cog):
                 "`>lrc track lyrics download <name> index=N`.",
                 is_user_error=True,
             )
-        hit, lyrics, fallback_plain = await self._track_lyrics(
-            query, index, prefer)
+        hit, lyrics, fallback_plain = await self._track_lyrics(query, index, prefer)
         want = prefer or "synced"
         text, ext = self._track_texts(lyrics, fallback_plain, want)
         if not text:
-            raise LrcError(
-                f"{hit['track']} - no lyrics file to build for that one 😟"
-            )
+            raise LrcError(f"{hit['track']} - no lyrics file to build for that one 😟")
         file = discord.File(
             io.BytesIO(text.encode("utf-8")),
             filename=f"{_safe_name(hit['artist'] + ' - ' + hit['track'])}.{ext}",
@@ -573,8 +656,11 @@ class LrcCog(Cog):
 
     async def _album_context(self, query: str) -> "tuple[dict, list[dict]]":
         raw = await self.hub.mono_search(query)
-        releases = [r for r in (raw.get("releases") or [])
-                    if isinstance(r, dict) and r.get("id")]
+        releases = [
+            r
+            for r in (raw.get("releases") or [])
+            if isinstance(r, dict) and r.get("id")
+        ]
         if not releases:
             raise LrcError(f"no album matched {query!r}.")
         rel = releases[0]
@@ -596,8 +682,7 @@ class LrcCog(Cog):
         }
         return album, tracks[:ALBUM_TRACK_CAP]
 
-    async def _probe_album(self, album: dict,
-                           tracks: list[dict]) -> list[dict]:
+    async def _probe_album(self, album: dict, tracks: list[dict]) -> list[dict]:
         """one first-match lookup per track, capped concurrency. never raises
         for a single track - that track just comes back 'none'."""
         sem = asyncio.Semaphore(LYRICS_CONCURRENCY)
@@ -605,8 +690,10 @@ class LrcCog(Cog):
 
         async def one(idx: int, track: dict) -> dict:
             title = str(track.get("title") or f"track {idx + 1}")
-            artist = ", ".join(str(a) for a in (track.get("artists") or [])) \
+            artist = (
+                ", ".join(str(a) for a in (track.get("artists") or []))
                 or album["artists"]
+            )
             try:
                 duration_s = int(track.get("duration") or 0) // 1000
             except (TypeError, ValueError):
@@ -624,9 +711,10 @@ class LrcCog(Cog):
             try:
                 async with sem:
                     data = await self.hub.lyrics_get(
-                        artist, title, album_title, entry["duration_s"])
-            except Exception: 
-                return entry  
+                        artist, title, album_title, entry["duration_s"]
+                    )
+            except Exception:
+                return entry
             if data.get("found"):
                 entry["found"] = True
                 entry["instrumental"] = bool(data.get("instrumental"))
@@ -634,8 +722,7 @@ class LrcCog(Cog):
                 entry["plain"] = data.get("plain")
             return entry
 
-        return list(await asyncio.gather(
-            *(one(i, t) for i, t in enumerate(tracks))))
+        return list(await asyncio.gather(*(one(i, t) for i, t in enumerate(tracks))))
 
     @staticmethod
     def _entry_flag(entry: dict) -> str:
@@ -657,20 +744,25 @@ class LrcCog(Cog):
                 is_user_error=True,
             )
         status = await self._reply(
-            invocation.message, f"pulling {query!r} + checking lyrics...")
+            invocation.message, f"pulling {query!r} + checking lyrics..."
+        )
         album, tracks = await self._album_context(query)
         probed = await self._probe_album(album, tracks)
         found = sum(1 for e in probed if e["found"] and not e["instrumental"])
-        lines = [f"**{album['title']}** - {album['artists']} · "
-                 f"{len(tracks)} tracks · lyrics for {found}"]
+        lines = [
+            f"**{album['title']}** - {album['artists']} · "
+            f"{len(tracks)} tracks · lyrics for {found}"
+        ]
         if album.get("artwork"):
             lines.append(f"[artwork]({album['artwork']})")
         for index, entry in enumerate(probed):
             lines.append(f"{index}. {entry['title']} · {self._entry_flag(entry)}")
         if len(tracks) == ALBUM_TRACK_CAP:
             lines.append(f"(capped at {ALBUM_TRACK_CAP} tracks)")
-        lines.append("view one: `>lrc album lyrics view <album> index=N` "
-                     "(track index, defaults to 0)")
+        lines.append(
+            "view one: `>lrc album lyrics view <album> index=N` "
+            "(track index, defaults to 0)"
+        )
         try:
             await status.delete()
         except discord.HTTPException:
@@ -685,7 +777,8 @@ class LrcCog(Cog):
                 is_user_error=True,
             )
         status = await self._reply(
-            invocation.message, f"pulling {query!r} + checking lyrics...")
+            invocation.message, f"pulling {query!r} + checking lyrics..."
+        )
         album, tracks = await self._album_context(query)
         probed = await self._probe_album(album, tracks)
         if index < 0 or index >= len(probed):
@@ -714,20 +807,24 @@ class LrcCog(Cog):
             except discord.HTTPException:
                 pass
             raise LrcError(f"{entry['title']} - nothing to show for that one 😟")
-        head = (f"**{entry['title']}** - {entry['artist']} · "
-                f"{album['title']} · track {entry['position']}")
+        head = (
+            f"**{entry['title']}** - {entry['artist']} · "
+            f"{album['title']} · track {entry['position']}"
+        )
         try:
             await status.delete()
         except discord.HTTPException:
             pass
         await self._send_code_chunks(
-            invocation.message, head, text, f"· {kind} · track {index}",
+            invocation.message,
+            head,
+            text,
+            f"· {kind} · track {index}",
             f"use `>lrc album lyrics download {query}`",
         )
 
     async def album_download_handler(self, invocation: Invocation):
-        query, _, prefer, zip_override = _parse_what(
-            invocation.arguments["what"])
+        query, _, prefer, zip_override = _parse_what(invocation.arguments["what"])
         if not prefer:
             prefer = "synced"
         if not query:
@@ -735,10 +832,14 @@ class LrcCog(Cog):
                 "give me an album - `>lrc album lyrics download <name>`.",
                 is_user_error=True,
             )
-        zip_on = (self._cfg.album_zip(invocation.message.author.id)
-                  if zip_override is None else zip_override)
+        zip_on = (
+            self._cfg.album_zip(invocation.message.author.id)
+            if zip_override is None
+            else zip_override
+        )
         status = await self._reply(
-            invocation.message, f"pulling {query!r} + checking lyrics...")
+            invocation.message, f"pulling {query!r} + checking lyrics..."
+        )
         album, tracks = await self._album_context(query)
         probed = await self._probe_album(album, tracks)
 
@@ -755,8 +856,9 @@ class LrcCog(Cog):
                 if text:
                     payloads.append((f"{_safe_name(stem)}.{ext}", text))
                     continue
-            no_lyrics.append(stem + (" (instrumental)"
-                                     if entry["instrumental"] else ""))
+            no_lyrics.append(
+                stem + (" (instrumental)" if entry["instrumental"] else "")
+            )
         found = len(payloads)
 
         try:
@@ -769,8 +871,10 @@ class LrcCog(Cog):
                 "had lyrics, so nothing to send."
             )
 
-        head = (f"**{album['title']}** - {album['artists']} · lyrics for "
-                f"{found}/{len(probed)} tracks · prefer {prefer}")
+        head = (
+            f"**{album['title']}** - {album['artists']} · lyrics for "
+            f"{found}/{len(probed)} tracks · prefer {prefer}"
+        )
         if no_lyrics:
             shown = ", ".join(no_lyrics[:8])
             if len(no_lyrics) > 8:
@@ -779,8 +883,7 @@ class LrcCog(Cog):
 
         if zip_on:
             buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w",
-                                 compression=zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 info: list[str] = [
                     f"{album['title']} — {album['artists']}",
                     f"tracks: {len(probed)}, preference: {prefer} "
@@ -789,25 +892,33 @@ class LrcCog(Cog):
                 ]
                 for name, text in payloads:
                     zf.writestr(name, text)
-                    info.append(f"{name.rsplit('.', 1)[0]}: "
-                                f"{name.rsplit('.', 1)[1]}")
+                    info.append(
+                        f"{name.rsplit('.', 1)[0]}: " f"{name.rsplit('.', 1)[1]}"
+                    )
                 for miss in no_lyrics:
                     info.append(f"{miss}: no lyrics")
                 zf.writestr("info.txt", "\n".join(info) + "\n")
             buffer.seek(0)
-            base = _safe_name(album['artists'] + " - " + album['title'])
+            base = _safe_name(album["artists"] + " - " + album["title"])
             file = discord.File(buffer, filename=f"{base} - lyrics.zip")
             await self._reply(invocation.message, head, file=file)
             return
 
-        files = [discord.File(io.BytesIO(text.encode("utf-8")), filename=name)
-                 for name, text in payloads]
+        files = [
+            discord.File(io.BytesIO(text.encode("utf-8")), filename=name)
+            for name, text in payloads
+        ]
         target = invocation.message
         for start in range(0, len(files), ATTACH_BATCH):
-            batch = files[start:start + ATTACH_BATCH]
-            label = head if start == 0 else (
-                f"{album['title']} (cont. {start + 1}-"
-                f"{start + len(batch)}/{len(files)})")
+            batch = files[start : start + ATTACH_BATCH]
+            label = (
+                head
+                if start == 0
+                else (
+                    f"{album['title']} (cont. {start + 1}-"
+                    f"{start + len(batch)}/{len(files)})"
+                )
+            )
             target = await self._reply_files(target, label, batch)
 
     async def config_show_handler(self, invocation: Invocation):
@@ -822,13 +933,16 @@ class LrcCog(Cog):
 
     async def config_zip_handler(self, invocation: Invocation):
         zip_on = self._cfg.set_album_zip(
-            invocation.message.author.id,
-            invocation.arguments["value"])
+            invocation.message.author.id, invocation.arguments["value"]
+        )
         await self._reply(
             invocation.message,
-            ("album lyrics downloads come as one zip again." if zip_on else
-             "album lyrics downloads now come loose - the .lrc/.txt files "
-             f"as attachments, up to {ATTACH_BATCH} per message."),
+            (
+                "album lyrics downloads come as one zip again."
+                if zip_on
+                else "album lyrics downloads now come loose - the .lrc/.txt files "
+                f"as attachments, up to {ATTACH_BATCH} per message."
+            ),
         )
 
     async def config_reset_handler(self, invocation: Invocation):

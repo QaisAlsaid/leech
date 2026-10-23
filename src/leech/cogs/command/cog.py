@@ -35,10 +35,8 @@ from leech.core.helpers.interactions.model import (
     media_name,
 )
 from leech.core.command.slash.press import PressTarget, press_and_collect
-import json
-import os
+from leech.core.store import Store, get_store, StoreError
 import logging
-from pathlib import Path
 import asyncio
 import io
 import httpx
@@ -48,7 +46,10 @@ from leech.core.cog.context import Priority
 from leech.core.permissions import is_owner
 
 PRESS_TTL = 15 * 60.0
-TEMPLATES_STORE = Path("persistent/v1/commands/templates.json")
+
+# v11: templates ride the store (ns `command_templates`, one row per
+# template keyed by name - the same shape migrate_persistent.py writes).
+NS_TEMPLATES = "command_templates"
 ECHO_MEDIA_CAP = 4
 ECHO_FILE_MAX_BYTES = 20 * 1024 * 1024
 
@@ -234,13 +235,16 @@ def format_template(template: InvokeAlias) -> str:
 
 
 class CommandCog(Cog):
-    def __init__(self, context: CogContext):
+    def __init__(self, context: CogContext, store: Store | None = None):
         super().__init__(context=context)
         self.context.add_on_load(self.load)
         self.invoke_aliases: dict[str, InvokeAlias] = {}
         self._press_entries: dict[int, PressEntry] = {}
         self.context.add_on_message(Priority.HIGH, self.on_press_reply)
         self._template_groups: set[str] = set()
+        self._store = store or get_store()
+        # v11: a failed load must never become a wipe on the next save.
+        self._templates_broken = False
 
     async def load(self):
         command = Command(
@@ -854,16 +858,19 @@ class CommandCog(Cog):
         )
 
     async def _load_templates(self) -> None:
-        TEMPLATES_STORE.parent.mkdir(parents=True, exist_ok=True)
-        if not TEMPLATES_STORE.exists():
-            return
         try:
-            data = json.loads(TEMPLATES_STORE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            _logger.error(f"failed to load templates: {e}")
+            rows = self._store.items(NS_TEMPLATES)
+        except StoreError as e:
+            self._templates_broken = True
+            _logger.error(
+                "template store unreadable (%s). templates stay unloaded "
+                "this session and changes will NOT be saved - fix the "
+                "store, then restart.",
+                e,
+            )
             return
 
-        for entry in data.get("templates", []):
+        for entry in rows.values():
             try:
                 template = template_from_dict(entry)
             except Exception as e:
@@ -887,19 +894,25 @@ class CommandCog(Cog):
         self._refresh_groups()
 
     def _save_templates(self) -> None:
-        tmp = TEMPLATES_STORE.with_suffix(".json.temp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "templates": [
-                        template_to_dict(t) for t in self.invoke_aliases.values()
-                    ]
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        os.replace(tmp, TEMPLATES_STORE)
+        if self._templates_broken:
+            _logger.error(
+                "template change NOT saved: the store failed to load this "
+                "session. restart once the store is reachable; nothing was "
+                "overwritten."
+            )
+            return
+        try:
+            rows = {
+                name: template_to_dict(t) for name, t in self.invoke_aliases.items()
+            }
+            live = self._store.items(NS_TEMPLATES)
+            for name, row in rows.items():
+                self._store.put(NS_TEMPLATES, name, row)
+            for name in live:
+                if name not in rows:
+                    self._store.delete(NS_TEMPLATES, name)
+        except StoreError as e:
+            _logger.error(f"failed to save templates: {e}")
 
     def _refresh_groups(self) -> None:
         self._template_groups = {
@@ -921,7 +934,7 @@ class CommandCog(Cog):
                         "command. pick another name 😁.",
                         is_user_error=True,
                     )
-                command.subcommands = old.subcommands   # keep nested templates alive
+                command.subcommands = old.subcommands  # keep nested templates alive
                 registry.unregister_command(name)
             if not self.context.add_command(name, command):
                 raise CogError(f"failed to register '{name}'.", is_user_error=True)

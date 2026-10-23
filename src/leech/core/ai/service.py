@@ -2,21 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import os
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Sequence
 from urllib.parse import urlparse
 
 import httpx
 
 from leech.core.error import BaseError
+from leech.core.store import Store, get_store, StoreError
 
 _logger = logging.getLogger(__name__)
+
+# v11: the ai cog's persistence rides the store. row shapes match the
+# migrator: ai_personas kv {channel_id: prompt}, ai_config doc
+# {active, muted, window_budget, chain}. the audit trail is the
+# append-only ai_log ns.
+NS_PERSONAS = "ai_personas"
+NS_CONFIG = "ai_config"
 
 
 class AiError(BaseError):
@@ -35,7 +41,9 @@ DEGRADE_NOTE = (
     "\n(the attached image could not be processed. answering without seeing it)"
 )
 AI_CHAIN_FALLBACK = "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite"
-GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_API = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 GROQ_API = "https://api.groq.com/openai/v1"
 THINKING_EFFORT = {"low": "low", "high": "high"}
 
@@ -180,9 +188,7 @@ class ManagerAi:
                 if attempt == 0 and time.monotonic() - started < 5.0:
                     await asyncio.sleep(0.75)
                     continue
-                raise AiError(
-                    f"ai service unreachable: {type(e).__name__}"
-                ) from e
+                raise AiError(f"ai service unreachable: {type(e).__name__}") from e
             if (
                 response.status_code >= 500
                 and attempt == 0
@@ -285,7 +291,9 @@ class _ManagerBackend:
 
     async def chat(self, *, system, turns, attachments, generation):
         return await self._client.chat(
-            system=system, turns=turns, attachments=attachments,
+            system=system,
+            turns=turns,
+            attachments=attachments,
             generation=generation,
         )
 
@@ -321,7 +329,7 @@ class _ManagerBackend:
         await self._client.chain_reset()
 
     def chain_state(self) -> Optional[list]:
-        return None 
+        return None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -516,9 +524,7 @@ class _DirectBackend:
 
     def __init__(self, *, turn_deadline: float = 75.0, keys: Optional[dict] = None):
         self._keys = keys if keys is not None else _env_keys()
-        self._read_timeout = float(
-            os.getenv("LEECH_AI_READ_TIMEOUT", "20") or 20
-        )
+        self._read_timeout = float(os.getenv("LEECH_AI_READ_TIMEOUT", "20") or 20)
         self._cooldown = float(os.getenv("LEECH_AI_COOLDOWN", "90") or 90)
         self._deadline = turn_deadline
         self._cooldowns: dict[str, float] = {}
@@ -766,6 +772,7 @@ class _MissingBackend:
     async def aclose(self) -> None:
         return None
 
+
 class AiService:
     def __init__(
         self,
@@ -776,7 +783,7 @@ class AiService:
         turn_deadline: float = 75.0,
         window_limit: int = 60,
         window_budget: int = 8_000,
-        store: Path = Path("persistent/v1/ai/ai.json"),
+        store: Store | None = None,
         backend: str = "",
     ):
         mode = (backend or os.getenv("LEECH_AI_BACKEND") or "auto").strip().lower()
@@ -808,7 +815,10 @@ class AiService:
         self._resolving: set[int] = set()
         self._deferred: dict[int, list[tuple[str, int, str, Optional[str]]]] = {}
         self._resolution_locks: dict[int, asyncio.Lock] = {}
-        self._store = store
+        self._store = store or get_store()
+        # v11: ai config + personas ride the store. a failed load means
+        # defaults this session and NO saves (never a wipe).
+        self._store_broken = False
         self._load()
         if isinstance(self._backend, _DirectBackend):
             self._backend.set_persist_hook(self._persist)
@@ -983,21 +993,46 @@ class AiService:
         )
 
     def _load(self) -> None:
-        self._store.parent.mkdir(parents=True, exist_ok=True)
-        if not self._store.exists():
+        try:
+            personas = self._store.items(NS_PERSONAS)
+            config = self._store.get_doc(NS_CONFIG)
+        except StoreError as e:
+            self._store_broken = True
+            _logger.error(
+                "ai store unreadable (%s). running on defaults; changes "
+                "will NOT be saved this session - fix the store, restart.",
+                e,
+            )
             return
-        data = json.loads(self._store.read_text(encoding="utf-8"))
-        self.personas = {int(k): v for k, v in data.get("personas", {}).items()}
-        self.active = set(data.get("active", []))
-        self.muted = set(data.get("muted", []))
-        if isinstance(data.get("window_budget"), int):
-            self._window_budget = max(1_000, data["window_budget"])
+        if not isinstance(config, dict):
+            config = {}
+        clean: dict[int, str] = {}
+        for key, value in personas.items():
+            try:
+                clean[int(key)] = value
+            except (TypeError, ValueError):
+                _logger.warning("skipping malformed persona key %r", key)
+        self.personas = clean
+        self.active = {
+            int(x) for x in config.get("active", []) if str(x).lstrip("-").isdigit()
+        }
+        self.muted = {
+            int(x) for x in config.get("muted", []) if str(x).lstrip("-").isdigit()
+        }
+        if isinstance(config.get("window_budget"), int):
+            self._window_budget = max(1_000, config["window_budget"])
         if isinstance(self._backend, _DirectBackend):
-            self._backend.restore_chain(data.get("chain"))
+            self._backend.restore_chain(config.get("chain"))
 
     def _persist(self) -> None:
+        if self._store_broken:
+            _logger.error(
+                "ai config NOT saved: the store failed to load this "
+                "session. restart once the store is reachable; nothing was "
+                "overwritten."
+            )
+            return
         payload: dict = {
-            "personas": {str(k): v for k, v in self.personas.items()},
             "active": sorted(self.active),
             "muted": sorted(self.muted),
             "window_budget": self._window_budget,
@@ -1005,6 +1040,14 @@ class AiService:
         chain = self._backend.chain_state()
         if chain is not None:
             payload["chain"] = chain
-        tmp = self._store.with_suffix(".json.temp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, self._store)
+        try:
+            self._store.put_doc(NS_CONFIG, payload)
+            wanted = {str(key) for key in self.personas}
+            live = self._store.items(NS_PERSONAS)
+            for key, prompt in self.personas.items():
+                self._store.put(NS_PERSONAS, str(key), prompt)
+            for key in live:
+                if key not in wanted:
+                    self._store.delete(NS_PERSONAS, key)
+        except StoreError as e:
+            _logger.error("ai config not saved: %s", e)

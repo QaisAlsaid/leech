@@ -1,26 +1,37 @@
 # leech/core/security/runtime.py
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
+import logging
 from typing import Optional
+
+from leech.core.store import Store, get_store, StoreError
 
 from .model import Decision, Grant
 
 AI_FORBIDDEN = ("command:auth.", "command:sudo")
+
+# v11: security rides the store. rows match the migrator's shapes:
+#   security_grants      ns: {actor: [{scope, allow}, ...]}
+#   security_delegations ns: {actor: {scope: bool}}
+NS_GRANTS = "security_grants"
+NS_DELEGATIONS = "security_delegations"
+
+_logger = logging.getLogger(__name__)
 
 
 class Security:
     def __init__(
         self,
         owner_ids: list[int],
-        store: Path = Path("persistent/v1/security/security.json"),
+        store: Store | None = None,
     ):
         self._owners = set(owner_ids)
-        self._store = store
+        self._store = store or get_store()
         self.grants: list[Grant] = []
         self.delegations: dict[str, dict[str, bool]] = {}
+        # v11: set when the store failed to load. reads run on defaults,
+        # writes are refused - a failed load must never turn into a wipe.
+        self._broken = False
         self._load()
 
     # -- decisions ------------------------------------------------------------
@@ -132,22 +143,62 @@ class Security:
 
     # -- persistence --------------------------------------------------------------
     def _load(self) -> None:
-        self._store.parent.mkdir(parents=True, exist_ok=True)
-        if not self._store.exists():
+        try:
+            grant_rows = self._store.items(NS_GRANTS)
+            deleg_rows = self._store.items(NS_DELEGATIONS)
+        except StoreError as e:
+            self._broken = True
+            _logger.error(
+                "security store unreadable (%s). starting with owners "
+                "only; changes will NOT be saved this session - fix the "
+                "store, then restart.",
+                e,
+            )
             return
-        data = json.loads(self._store.read_text(encoding="utf-8"))
-        self.grants = [Grant(**g) for g in data.get("grants", [])]
-        self.delegations = data.get("delegations", {})
+        for actor, rows in grant_rows.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict) and row.get("scope") is not None:
+                    self.grants.append(
+                        Grant(
+                            actor=str(actor),
+                            scope=str(row["scope"]),
+                            allow=bool(row.get("allow", True)),
+                        )
+                    )
+        for actor, scopes in deleg_rows.items():
+            if isinstance(scopes, dict):
+                self.delegations[str(actor)] = {
+                    str(scope): bool(value) for scope, value in scopes.items()
+                }
 
     def _persist(self) -> None:
-        tmp = self._store.with_suffix(".json.temp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "grants": [g.model_dump() for g in self.grants],
-                    "delegations": self.delegations,
-                }
-            ),
-            encoding="utf-8",
-        )
-        os.replace(tmp, self._store)
+        if self._broken:
+            _logger.error(
+                "security change NOT saved: the store failed to load this "
+                "session. restart once the store is reachable; nothing was "
+                "overwritten."
+            )
+            return
+        try:
+            grants: dict[str, list[dict]] = {}
+            for grant in self.grants:
+                grants.setdefault(grant.actor, []).append(
+                    {"scope": grant.scope, "allow": grant.allow}
+                )
+            live = self._store.items(NS_GRANTS)
+            for actor, rows in grants.items():
+                self._store.put(NS_GRANTS, actor, rows)
+            for actor in live:
+                if actor not in grants:
+                    self._store.delete(NS_GRANTS, actor)
+
+            live = self._store.items(NS_DELEGATIONS)
+            for actor, scopes in self.delegations.items():
+                self._store.put(NS_DELEGATIONS, actor, scopes)
+            for actor in live:
+                if actor not in self.delegations:
+                    self._store.delete(NS_DELEGATIONS, actor)
+        except StoreError as e:
+            _logger.error("security change not saved: %s", e)

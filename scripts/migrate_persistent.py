@@ -11,7 +11,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DOC_NAMESPACES = ("ai_config", "lrc_config", "channel")
+DOC_NAMESPACES = ("ai_config", "lrc_config", "ytdlp_prefs", "channel")
+
+# namespaces whose live source moved to the store BEFORE v11: a full
+# re-run would revert them to stale v1 data. (v11 rewired every cog, so
+# from now on v1 is only a top-up source for namespaces you name.)
+LIVE_SINCE_V10 = ("todo", "todo_undo", "todo_backup", "user_prefs")
 
 
 def read_json(path: Path) -> Any | None:
@@ -89,7 +94,9 @@ def collect(v1: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[d
                 record = json.loads(buffer, strict=False)
             except json.JSONDecodeError:
                 if len(buffer) > 100_000:  # runaway garbage - give up on it
-                    print(f"  ! dropping an unparseable actions.jsonl chunk: {buffer[:60]}")
+                    print(
+                        f"  ! dropping an unparseable actions.jsonl chunk: {buffer[:60]}"
+                    )
                     buffer = ""
                 continue
             logs.append(record)
@@ -114,6 +121,10 @@ def collect(v1: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[d
     lrc = read_json(v1 / "lrc" / "lrc.json")
     if lrc is not None:
         docs["lrc_config"] = lrc
+
+    prefs = read_json(v1 / "ytdlp" / "prefs.json")
+    if isinstance(prefs, dict) and prefs:
+        docs["ytdlp_prefs"] = prefs
 
     channel = read_json(v1 / "channel.json")
     if channel is not None:
@@ -147,9 +158,29 @@ def collect_v2(v2: Path) -> tuple[dict[str, dict[str, Any]], list[dict]]:
     return kv, logs
 
 
+def apply_only(
+    kv: dict[str, dict[str, Any]],
+    docs: dict[str, Any],
+    logs: list[dict],
+    only: str | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[dict], list[str]]:
+    """v11: filter the collected payload down to the requested
+    namespaces (a top-up). 'ai_log' is the name for the audit log.
+    returns (kv, docs, logs, unknown-names) so typos get reported."""
+    if not only:
+        return kv, docs, logs, []
+    keep = {name.strip() for name in only.split(",") if name.strip()}
+    known = set(kv) | set(docs) | {"ai_log"}
+    unknown = sorted(keep - known)
+    kv = {ns: rows for ns, rows in kv.items() if ns in keep}
+    docs = {ns: value for ns, value in docs.items() if ns in keep}
+    logs = list(logs) if "ai_log" in keep else []
+    return kv, docs, logs, unknown
+
+
 def make_store(backend: str):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from leech.core.store import Store, reset_store 
+    from leech.core.store import Store, reset_store
 
     os.environ["LEECH_STORE"] = backend
     if backend == "json" and "LEECH_STORE_DIR" not in os.environ:
@@ -157,7 +188,8 @@ def make_store(backend: str):
     reset_store()
     from leech.core.store import get_store
 
-    return get_store(sync=True) 
+    return get_store(sync=True)
+
 
 def wipe(store, kv: dict, docs: dict) -> int:
     removed = 0
@@ -205,32 +237,50 @@ def verify(store, kv: dict, docs: dict, logs: list[dict]) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="migrate persistent/v1 into the v10.7 store."
+        description="migrate persistent/v1 into the store (v11: every cog "
+        "rides it - command templates, security, ai, mono, lrc, ytdlp "
+        "prefs, todo)."
     )
     parser.add_argument(
-        "--from", dest="source", default="persistent/v1",
+        "--from",
+        dest="source",
+        default="persistent/v1",
         help="v1 tree to read (default: persistent/v1)",
     )
     parser.add_argument(
-        "--backend", choices=("json", "supabase"), default=None,
+        "--backend",
+        choices=("json", "supabase"),
+        default=None,
         help="store backend (default: LEECH_STORE env, else json)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="collect and report only - write nothing",
     )
     parser.add_argument(
-        "--wipe", action="store_true",
+        "--wipe",
+        action="store_true",
         help="delete existing keys in target namespaces before writing",
     )
     parser.add_argument(
-        "--include-v2", action="store_true",
+        "--only",
+        default=None,
+        help="comma-separated namespaces to touch (top-up mode). "
+        "everything else in the target is left alone. include 'ai_log' "
+        "to (re)import the audit log - a top-up without it never "
+        "re-appends log rows.",
+    )
+    parser.add_argument(
+        "--include-v2",
+        action="store_true",
         help="overlay rows from the v10.7 json store on top of the v1 "
         "data - for going supabase after running v10.7 on json. v2 keys "
         "win; v2 log rows are appended.",
     )
     parser.add_argument(
-        "--v2-from", default=None,
+        "--v2-from",
+        default=None,
         help="where the v10.7 json store lives (default: LEECH_STORE_DIR "
         "env, else persistent/v2) - the overlay source, NOT the target",
     )
@@ -245,8 +295,7 @@ def main() -> int:
 
     v2_rows = 0
     if args.include_v2:
-        v2 = Path(args.v2_from or os.getenv("LEECH_STORE_DIR")
-                  or "persistent/v2")
+        v2 = Path(args.v2_from or os.getenv("LEECH_STORE_DIR") or "persistent/v2")
         overlay, v2_logs = collect_v2(v2)
         for ns, rows in overlay.items():
             kv.setdefault(ns, {}).update(rows)
@@ -254,6 +303,16 @@ def main() -> int:
         if v2_logs:
             logs.extend(v2_logs)
             v2_rows += len(v2_logs)
+
+    if args.only:
+        before = sum(len(rows) for rows in kv.values()) + len(docs) + len(logs)
+        kv, docs, logs, unknown = apply_only(kv, docs, logs, args.only)
+        if unknown:
+            print(f"  ! --only names that matched nothing: " f"{', '.join(unknown)}")
+        print(
+            f"  top-up: {before - len(logs) - sum(len(r) for r in kv.values()) - len(docs)}"
+            f" collected row(s) left outside the selection."
+        )
 
     total = sum(len(rows) for rows in kv.values()) + len(docs) + len(logs)
     if not total:
@@ -269,8 +328,10 @@ def main() -> int:
         print(f"  {'ai_log':<20} {len(logs):>5} row(s)")
     print(f"  {'TOTAL':<20} {total:>5}")
     if args.include_v2 and v2_rows:
-        print(f"  (includes {v2_rows} row(s) overlaid from the v10.7 json "
-              f"store - v2 wins on key conflicts)")
+        print(
+            f"  (includes {v2_rows} row(s) overlaid from the v10.7 json "
+            f"store - v2 wins on key conflicts)"
+        )
 
     if args.dry_run:
         print("dry run - nothing written.")
@@ -289,6 +350,38 @@ def main() -> int:
         return 2
 
     store = make_store(backend)
+
+    # v11: re-run safety. if the target already holds rows in a selected
+    # namespace, say so BEFORE writing anything.
+    occupied: list[tuple[str, int]] = []
+    try:
+        for ns in sorted({**kv, **docs}):
+            if ns in docs:
+                if store.get_doc(ns) is not None:
+                    occupied.append((ns, 1))
+            else:
+                live = len(store.items(ns))
+                if live:
+                    occupied.append((ns, live))
+    except Exception as e:
+        print(f"cannot read the target store back: {e}")
+        return 2
+    if occupied:
+        for ns, count in occupied:
+            print(f"  . target already holds {count} row(s) in {ns}")
+        if args.only:
+            print(
+                "  top-up: matching v1 rows overwrite those keys; "
+                "everything else stays untouched."
+            )
+        else:
+            print(
+                "  WARNING: full re-run - v1 wins in EVERY namespace it "
+                "has, including ones whose live source is already the store "
+                "(" + ", ".join(LIVE_SINCE_V10) + ") - those would revert to "
+                "stale v1 data. ai_log rows also append AGAIN (duplicates). "
+                "for a top-up use --only."
+            )
 
     if args.wipe:
         removed = wipe(store, kv, docs)

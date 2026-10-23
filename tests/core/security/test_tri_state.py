@@ -1,8 +1,9 @@
 from leech.core.security.runtime import Security
+from leech.core.store.json_store import JsonStore
 
 
 def security(tmp_path, owners=(1,)):
-    return Security(list(owners), store=tmp_path / "opsec.json")
+    return Security(list(owners), store=JsonStore(tmp_path / "store"))
 
 
 def test_default_delegation_is_ask(tmp_path):
@@ -15,7 +16,7 @@ def test_allow_is_explicit_and_persisted(tmp_path):
     s = security(tmp_path)
     s.allow_delegation(2, "command:todo.add")
     assert s.delegation_mode(2, "command:todo.add") == "allow"
-    reloaded = Security([1], store=tmp_path / "opsec.json")
+    reloaded = Security([1], store=JsonStore(tmp_path / "store"))
     assert reloaded.delegation_mode(2, "command:todo.add") == "allow"
 
 

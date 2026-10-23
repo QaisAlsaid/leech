@@ -1,35 +1,48 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from leech.core.error import BaseError
+from leech.core.store import Store, get_store, StoreError
 
 _logger = logging.getLogger(__name__)
 
-MONO_BASE = (os.getenv("MONO_BASE") or "https://tracks.monochrome.st").strip().rstrip("/")
-SERVER_URL = (
-    os.getenv("LEECH_HUB_URL") or ""
-).strip().rstrip("/")
-SERVER_TOKEN = (
-    os.getenv("LEECH_HUB_TOKEN")
-    or ""
-).strip()
+NS_MONO = "mono_users"
 
-QUALITIES = ("flac", "320", "256", "192", "128", "96", "64", "wav", "m4a",
-             "opus", "copy")
+MONO_BASE = (
+    (os.getenv("MONO_BASE") or "https://tracks.monochrome.st").strip().rstrip("/")
+)
+SERVER_URL = (os.getenv("LEECH_HUB_URL") or "").strip().rstrip("/")
+SERVER_TOKEN = (os.getenv("LEECH_HUB_TOKEN") or "").strip()
+
+QUALITIES = (
+    "flac",
+    "320",
+    "256",
+    "192",
+    "128",
+    "96",
+    "64",
+    "wav",
+    "m4a",
+    "opus",
+    "copy",
+)
 LYRICS_MODES = ("off", "embed", "sidecar")
 LYRICS_PREFERS = ("synced", "plain")
 ZIP_MODES = ("on", "off")
 CONFIG_KEYS = ("quality", "lyrics_mode", "lyrics_prefer", "album_zip")
-DEFAULT_CONFIG = {"quality": "flac", "lyrics_mode": "sidecar",
-                  "lyrics_prefer": "synced", "album_zip": "on"}
+DEFAULT_CONFIG = {
+    "quality": "flac",
+    "lyrics_mode": "sidecar",
+    "lyrics_prefer": "synced",
+    "album_zip": "on",
+}
 
 
 class MonoError(BaseError):
@@ -79,15 +92,17 @@ def parse_search(data: dict) -> dict:
             duration = int(item.get("duration") or 0)
         except (TypeError, ValueError):
             duration = 0
-        tracks.append({
-            "id": tid,
-            "title": str(item.get("title") or "?"),
-            "artists": _names(item.get("artistNames")),
-            "artwork": item.get("artwork"),
-            "duration": duration,
-            "release_id": str(item.get("releaseId") or "") or None,
-            "explicit": bool(item.get("explicit")),
-        })
+        tracks.append(
+            {
+                "id": tid,
+                "title": str(item.get("title") or "?"),
+                "artists": _names(item.get("artistNames")),
+                "artwork": item.get("artwork"),
+                "duration": duration,
+                "release_id": str(item.get("releaseId") or "") or None,
+                "explicit": bool(item.get("explicit")),
+            }
+        )
 
     for item in data.get("releases") or []:
         if not isinstance(item, dict):
@@ -96,15 +111,17 @@ def parse_search(data: dict) -> dict:
         if not rid:
             continue
         year = str(item.get("releaseDate") or "")[:4]
-        releases.append({
-            "id": rid,
-            "title": str(item.get("title") or "?"),
-            "artists": _names(item.get("artistNames")),
-            "year": year if year.isdigit() else "",
-            "type": str(item.get("releaseType") or "").lower(),
-            "label": item.get("label"),
-            "artwork": item.get("artwork"),
-        })
+        releases.append(
+            {
+                "id": rid,
+                "title": str(item.get("title") or "?"),
+                "artists": _names(item.get("artistNames")),
+                "year": year if year.isdigit() else "",
+                "type": str(item.get("releaseType") or "").lower(),
+                "label": item.get("label"),
+                "artwork": item.get("artwork"),
+            }
+        )
 
     for item in data.get("artists") or []:
         if not isinstance(item, dict):
@@ -112,20 +129,25 @@ def parse_search(data: dict) -> dict:
         aid = str(item.get("id") or item.get("artistId") or "").strip()
         if not aid:
             continue
-        artists.append({
-            "id": aid,
-            "name": str(item.get("displayName") or item.get("name") or "?"),
-            "username": item.get("username"),
-            "bio": item.get("bio"),
-            "avatar": item.get("avatar"),
-        })
+        artists.append(
+            {
+                "id": aid,
+                "name": str(item.get("displayName") or item.get("name") or "?"),
+                "username": item.get("username"),
+                "bio": item.get("bio"),
+                "avatar": item.get("avatar"),
+            }
+        )
 
     return {"tracks": tracks, "releases": releases, "artists": artists}
 
 
 class MonoService:
-    def __init__(self, *, store: Path = Path("persistent/v1/monochrome/monochrome.json")):
-        self._store = store
+    # v11: per-user monochrome prefs ride the store (ns `mono_users`,
+    # {user_id: prefs} - the shape migrate_persistent.py writes).
+    def __init__(self, *, store: Store | None = None):
+        self._store = store or get_store()
+        self._broken = False  # failed load -> defaults, never a wipe
         self._users: dict[int, dict] = {}
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
         self._load()
@@ -151,24 +173,28 @@ class MonoService:
     def _headers(self) -> dict:
         return {"x-leech-token": SERVER_TOKEN} if SERVER_TOKEN else {}
 
-    async def _api(self, method: str, path: str, body: dict | None = None,
-                   params: dict | None = None) -> dict:
+    async def _api(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        params: dict | None = None,
+    ) -> dict:
         if not self.server_configured:
             raise MonoError(
-                "the leech-hub isn't configured (LEECH_HUB_URL / "
-                "LEECH_HUB_TOKEN)."
+                "the leech-hub isn't configured (LEECH_HUB_URL / " "LEECH_HUB_TOKEN)."
             )
         try:
             if method == "GET":
                 resp = await self._http.get(
-                    SERVER_URL + path, params=params, headers=self._headers())
+                    SERVER_URL + path, params=params, headers=self._headers()
+                )
             else:
                 resp = await self._http.post(
-                    SERVER_URL + path, json=body, headers=self._headers())
+                    SERVER_URL + path, json=body, headers=self._headers()
+                )
         except httpx.HTTPError as exc:
-            raise MonoError(
-                f"leech-hub unreachable: {type(exc).__name__}"
-            ) from exc
+            raise MonoError(f"leech-hub unreachable: {type(exc).__name__}") from exc
         if resp.status_code == 401:
             raise MonoError(
                 "the leech-hub rejected the token "
@@ -194,59 +220,74 @@ class MonoService:
     async def health(self) -> dict:
         return await self._api("GET", "/api/health")
 
-    async def submit_track(self, track: dict, quality: str,
-                           lyrics: Optional[dict] = None) -> str:
-        data = await self._api("POST", "/api/mono/track", body={
-            "id": track["id"],
-            "quality": quality,
-            "lyrics": lyrics or {"mode": "off", "prefer": "synced"},
-            "meta": {
-                "title": track.get("title"),
-                "artists": track.get("artists") or [],
-                "artwork": track.get("artwork"),
-                "duration": track.get("duration"),
+    async def submit_track(
+        self, track: dict, quality: str, lyrics: Optional[dict] = None
+    ) -> str:
+        data = await self._api(
+            "POST",
+            "/api/mono/track",
+            body={
+                "id": track["id"],
+                "quality": quality,
+                "lyrics": lyrics or {"mode": "off", "prefer": "synced"},
+                "meta": {
+                    "title": track.get("title"),
+                    "artists": track.get("artists") or [],
+                    "artwork": track.get("artwork"),
+                    "duration": track.get("duration"),
+                },
             },
-        })
+        )
         return str(data["job"])
 
-    async def submit_album(self, release: dict, quality: str,
-                           lyrics: Optional[dict] = None,
-                           zip_enabled: bool = True) -> str:
+    async def submit_album(
+        self,
+        release: dict,
+        quality: str,
+        lyrics: Optional[dict] = None,
+        zip_enabled: bool = True,
+    ) -> str:
         # zip=False asks the runner for loose files instead: every track
         # gets uploaded on its own and the result carries a `files` list.
         # needs the hub's v4 album patch; an unpatched hub just ignores
         # the field and keeps zipping (api-compatible either way).
-        data = await self._api("POST", "/api/mono/album", body={
-            "id": release["id"],
-            "quality": quality,
-            "lyrics": lyrics or {"mode": "off", "prefer": "synced"},
-            "zip": bool(zip_enabled),
-            "meta": {
-                "title": release.get("title"),
-                "artists": release.get("artists") or [],
-                "artwork": release.get("artwork"),
+        data = await self._api(
+            "POST",
+            "/api/mono/album",
+            body={
+                "id": release["id"],
+                "quality": quality,
+                "lyrics": lyrics or {"mode": "off", "prefer": "synced"},
+                "zip": bool(zip_enabled),
+                "meta": {
+                    "title": release.get("title"),
+                    "artists": release.get("artists") or [],
+                    "artwork": release.get("artwork"),
+                },
             },
-        })
+        )
         return str(data["job"])
 
     async def job_status(self, job_id: str) -> dict:
         data = await self._api("GET", f"/api/jobs/{job_id}")
         return dict(data.get("job") or {})
 
-
     async def release(self, release_id: str) -> dict:
         data = await self._api("GET", f"/api/mono/release/{release_id}")
         return dict(data.get("data") or {})
 
     async def lyrics_search(self, query: str) -> list[dict]:
-        data = await self._api("GET", "/api/lyrics/search",
-                               params={"q": query})
+        data = await self._api("GET", "/api/lyrics/search", params={"q": query})
         return list(data.get("data") or [])
 
-    async def lyrics_get(self, artist: str, track: str,
-                         album: Optional[str] = None,
-                         duration: Optional[int] = None,
-                         prefer: str = "synced") -> dict:
+    async def lyrics_get(
+        self,
+        artist: str,
+        track: str,
+        album: Optional[str] = None,
+        duration: Optional[int] = None,
+        prefer: str = "synced",
+    ) -> dict:
         params = {"artist": artist, "track": track, "prefer": prefer}
         if album:
             params["album"] = album
@@ -262,7 +303,6 @@ class MonoService:
         data = await self._api("GET", "/api/lyrics/get", params=params)
         return dict(data.get("data") or {})
 
-
     async def search(self, query: str) -> dict:
         query = (query or "").strip()
         if not query:
@@ -270,7 +310,8 @@ class MonoService:
         data: Optional[dict] = None
         try:
             resp = await self._http.get(
-                f"{MONO_BASE}/search", params={"q": query}, timeout=20.0)
+                f"{MONO_BASE}/search", params={"q": query}, timeout=20.0
+            )
             if resp.status_code == 200:
                 data = resp.json()
         except (httpx.HTTPError, ValueError):
@@ -278,8 +319,10 @@ class MonoService:
         if data is None and self.server_configured:
             try:
                 resp = await self._http.get(
-                    f"{SERVER_URL}/api/mono/search", params={"q": query},
-                    headers=self._headers())
+                    f"{SERVER_URL}/api/mono/search",
+                    params={"q": query},
+                    headers=self._headers(),
+                )
                 if resp.status_code == 200 and resp.json().get("ok"):
                     data = resp.json().get("data")
             except (httpx.HTTPError, ValueError):
@@ -294,16 +337,28 @@ class MonoService:
     async def find_track(self, query: str) -> Optional[dict]:
         text = (query or "").strip()
         if text.isdigit() and len(text) >= 6:
-            return {"id": text, "title": None, "artists": [], "artwork": None,
-                    "duration": 0, "release_id": None}
+            return {
+                "id": text,
+                "title": None,
+                "artists": [],
+                "artwork": None,
+                "duration": 0,
+                "release_id": None,
+            }
         result = await self.search(text)
         return result["tracks"][0] if result["tracks"] else None
 
     async def find_release(self, query: str) -> Optional[dict]:
         text = (query or "").strip()
         if text.isdigit() and len(text) >= 6:
-            return {"id": text, "title": None, "artists": [], "artwork": None,
-                    "year": "", "type": ""}
+            return {
+                "id": text,
+                "title": None,
+                "artists": [],
+                "artwork": None,
+                "year": "",
+                "type": "",
+            }
         result = await self.search(text)
         return result["releases"][0] if result["releases"] else None
 
@@ -311,11 +366,14 @@ class MonoService:
         started = time.monotonic()
         try:
             resp = await self._http.get(
-                f"{MONO_BASE}/search", params={"q": "test"}, timeout=10.0)
-            return resp.status_code == 200, f"{(time.monotonic() - started) * 1000:.0f} ms"
+                f"{MONO_BASE}/search", params={"q": "test"}, timeout=10.0
+            )
+            return (
+                resp.status_code == 200,
+                f"{(time.monotonic() - started) * 1000:.0f} ms",
+            )
         except httpx.HTTPError as exc:
             return False, type(exc).__name__
-
 
     def config(self, user_id: int) -> dict:
         merged = dict(DEFAULT_CONFIG)
@@ -331,21 +389,21 @@ class MonoService:
             )
         text = str(value).strip().lower()
         if key == "quality" and text not in QUALITIES:
-            raise MonoError(
-                "quality must be one of: " + ", ".join(QUALITIES) + "."
-            )
+            raise MonoError("quality must be one of: " + ", ".join(QUALITIES) + ".")
         if key == "lyrics_mode" and text not in LYRICS_MODES:
             raise MonoError(
-                    "lyrics must be (off, embed, sidecard) embed: (written into the file's tags) or "
-                    "sidecar: (a separate .lrc/.txt)."
+                "lyrics must be (off, embed, sidecard) embed: (written into the file's tags) or "
+                "sidecar: (a separate .lrc/.txt)."
             )
         if key == "lyrics_prefer" and text not in LYRICS_PREFERS:
             raise MonoError("lyrics-prefer must be synced or plain.")
         if key == "album_zip":
             text = _norm_zip(value)
             if text not in ZIP_MODES:
-                raise MonoError("zip must be on or off - `>mono config zip off` "
-                                "gets you loose files instead of an album zip.")
+                raise MonoError(
+                    "zip must be on or off - `>mono config zip off` "
+                    "gets you loose files instead of an album zip."
+                )
         entry = self._users.setdefault(int(user_id), {})
         entry[key] = text
         self._persist()
@@ -355,53 +413,77 @@ class MonoService:
         self._persist()
 
     def quality(self, user_id: int) -> str:
-        value = str(self.config(user_id).get("quality") or
-                    DEFAULT_CONFIG["quality"]).lower()
+        value = str(
+            self.config(user_id).get("quality") or DEFAULT_CONFIG["quality"]
+        ).lower()
         return value if value in QUALITIES else DEFAULT_CONFIG["quality"]
 
     def lyrics_cfg(self, user_id: int) -> dict:
         cfg = self.config(user_id)
         mode = str(cfg.get("lyrics_mode") or DEFAULT_CONFIG["lyrics_mode"]).lower()
-        prefer = str(cfg.get("lyrics_prefer") or
-                     DEFAULT_CONFIG["lyrics_prefer"]).lower()
+        prefer = str(
+            cfg.get("lyrics_prefer") or DEFAULT_CONFIG["lyrics_prefer"]
+        ).lower()
         return {
             "mode": mode if mode in LYRICS_MODES else DEFAULT_CONFIG["lyrics_mode"],
-            "prefer": prefer if prefer in LYRICS_PREFERS
-            else DEFAULT_CONFIG["lyrics_prefer"],
+            "prefer": (
+                prefer if prefer in LYRICS_PREFERS else DEFAULT_CONFIG["lyrics_prefer"]
+            ),
         }
 
     def album_zip(self, user_id: int) -> bool:
         """per-user: zip the album (True, default) or loose files (False)."""
-        value = str(self.config(user_id).get("album_zip")
-                    or DEFAULT_CONFIG["album_zip"]).lower()
+        value = str(
+            self.config(user_id).get("album_zip") or DEFAULT_CONFIG["album_zip"]
+        ).lower()
         return _norm_zip(value) != "off"
 
     def _load(self) -> None:
-        self._store.parent.mkdir(parents=True, exist_ok=True)
-        if not self._store.exists():
-            return
         try:
-            data = json.loads(self._store.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            _logger.warning("monochrome config unreadable. starting empty")
+            rows = self._store.items(NS_MONO)
+        except StoreError as e:
+            self._broken = True
+            _logger.warning(
+                "monochrome store unreadable (%s). starting empty; changes "
+                "will NOT be saved this session.",
+                e,
+            )
             return
-        raw = data.get("users", {}) if isinstance(data, dict) else {}
         self._users = {
             int(key): (value if isinstance(value, dict) else {})
-            for key, value in raw.items()
+            for key, value in rows.items()
             if str(key).isdigit()
         }
 
     def _persist(self) -> None:
-        payload = {"users": {str(k): v for k, v in self._users.items()}}
-        tmp = self._store.with_suffix(".json.temp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, self._store)
+        if self._broken:
+            _logger.warning(
+                "monochrome prefs NOT saved: the store failed to load this "
+                "session. restart once the store is reachable."
+            )
+            return
+        try:
+            wanted = {str(key) for key in self._users}
+            live = self._store.items(NS_MONO)
+            for key, prefs in self._users.items():
+                self._store.put(NS_MONO, str(key), prefs)
+            for key in live:
+                if key not in wanted:
+                    self._store.delete(NS_MONO, key)
+        except StoreError as e:
+            _logger.warning("monochrome config not saved: %s", e)
 
 
 def _norm_zip(value) -> str:
     """on/off with a few friendly aliases folded in."""
     text = str(value or "").strip().lower()
-    return {"true": "on", "yes": "on", "zip": "on", "1": "on",
-            "false": "off", "no": "off", "loose": "off", "0": "off"}.get(text, text)
-
+    return {
+        "true": "on",
+        "yes": "on",
+        "zip": "on",
+        "1": "on",
+        "false": "off",
+        "no": "off",
+        "loose": "off",
+        "0": "off",
+    }.get(text, text)

@@ -10,6 +10,7 @@ KNOWN_NAMESPACES = (
     "todo",
     "todo_undo",
     "todo_backup",
+    "user_prefs",
     "security_grants",
     "security_delegations",
     "ai_personas",
@@ -17,6 +18,7 @@ KNOWN_NAMESPACES = (
     "command_templates",
     "mono_users",
     "lrc_config",
+    "ytdlp_prefs",
     "channel",
 )
 

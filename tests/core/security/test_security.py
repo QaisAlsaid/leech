@@ -1,8 +1,9 @@
 from leech.core.security.runtime import Security
+from leech.core.store.json_store import JsonStore
 
 
 def security(tmp_path, owners=(1,), grants=(), delegations=None):
-    s = Security(list(owners), store=tmp_path / "opsec.json")
+    s = Security(list(owners), store=JsonStore(tmp_path / "store"))
     s.grants = list(grants)
     s.delegations = dict(delegations or {})
     return s

@@ -22,6 +22,7 @@ where = ["src"]
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "black",
 ]
 

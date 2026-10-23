@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-import json
+import logging
 import time
-from pathlib import Path
 from typing import Any
+
+from leech.core.store import Store, get_store, StoreError
+
+# v11: the audit trail rides the store's append-only log - json backend
+# writes ai_log.jsonl, supabase appends to the leech_log table. same ns
+# the migrator imports persistent/v1/ai/actions.jsonl into.
+NS_LOG = "ai_log"
+
+_logger = logging.getLogger(__name__)
 
 
 class ActionLog:
-    def __init__(self, path: Path = Path("persistent/v1/ai/actions.jsonl")):
-        self._path = path
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, store: Store | None = None):
+        self._store = store or get_store()
 
     def write(
         self,
@@ -31,5 +38,8 @@ class ActionLog:
             "outcome": outcome,
             "note": note,
         }
-        with self._path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        try:
+            self._store.append_log(NS_LOG, entry)
+        except StoreError as e:
+            # the audit trail must never take a command down with it.
+            _logger.error("ai action not logged: %s", e)
