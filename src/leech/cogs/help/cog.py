@@ -18,7 +18,7 @@ from leech.core.cog.error import CogError
 from leech.core.command.mock.binding import MockBinding
 from leech.core.command.helpers import is_invocable
 import leech.core.parser.lexer as lexer
-import leech.core.helpers.text.splitter as splitter
+import leech.core.helpers.text.paginator as paginator
 import leech.core.command.resolver as resolver
 
 
@@ -487,9 +487,9 @@ class HelpCog(Cog):
 
                     text = "\n\n---\n\n".join(pages)
 
-        message = invocation.message
-        for chunk in splitter.split(text):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, text, client=self.context.client
+        )
 
     async def concepts_handler(self, invocation: Invocation):
         raw = invocation.arguments.get("concept")
@@ -513,9 +513,9 @@ class HelpCog(Cog):
                 )
             text = f"**concept: {key}**\n\n{concept.body}"
 
-        message = invocation.message
-        for chunk in splitter.split(text):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, text, client=self.context.client
+        )
 
 
 def create_cog(context: CogContext):

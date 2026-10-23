@@ -214,6 +214,16 @@ class ChannelCog(Cog):
         commit = page.get("commit") or ""
         if commit:
             parts.append(f"commit: `{str(commit)[:12]}`")
+        message = str(page.get("commit_message") or "").strip()
+        if message:
+            who = str(page.get("commit_author") or "").strip()
+            when = str(page.get("commit_time") or "").strip()
+            bits = [f'"{message[:90]}"']
+            if who:
+                bits.append(who)
+            if when:
+                bits.append(when)
+            parts.append(f"last commit: {' · '.join(bits)}")
         alive = page.get("app_alive")
         parts.append(f"app: {'alive' if alive else 'DOWN'}")
         if page.get("app_uptime"):

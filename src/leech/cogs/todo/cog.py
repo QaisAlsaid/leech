@@ -6,8 +6,9 @@ from leech.core.parser.types.registry import Types, TypesRegistry
 from leech.core.command.native.binding import NativeBinding
 from leech.core.command.mock.binding import MockBinding
 from leech.core.error import BaseError
-import leech.core.helpers.text.splitter as splitter
-from .service import Perms, TodoService
+import leech.core.helpers.text.paginator as paginator
+import time
+from .service import Perms, TodoService, UNDO_KEEP
 
 DISCORD_MESSAGE_LIMIT = 2000
 
@@ -76,7 +77,97 @@ class TodoCog(Cog):
             **self.get_lists(),
             **self.get_activate(),
             **self.get_deactivate(),
+            **self.get_undo(),
+            **self.get_log(),
+            **self.get_backup(),
+            **self.get_restore(),
         }
+
+    def get_undo(self) -> dict[str, Command]:
+        undo = Command(
+            name="undo",
+            description="undo the last change to YOUR lists (whoever made it).",
+            usage_example=">todo undo",
+            help_content=(
+                "restores your lists to how they were before the most "
+                "recent mutation - even if the AI or another editor made "
+                "it. undo again to walk back another step (the last "
+                f"{UNDO_KEEP} steps are kept). once you make a new edit, the "
+                "undone path is gone - there is no redo."
+            ),
+            arguments=[],
+            subcommands={},
+            binding=NativeBinding(self.undo_handler),
+        )
+        return {undo.name: undo}
+
+    def get_log(self) -> dict[str, Command]:
+        log = Command(
+            name="log",
+            description="who changed your lists, and when.",
+            usage_example=">todo log",
+            help_content=(
+                "the last mutations on YOUR lists (by you, by editors, or "
+                "by the AI acting through the dispatcher) - newest first. "
+                "this is the audit trail that was missing the night the "
+                "AI removed tasks from the wrong list."
+            ),
+            arguments=[
+                Argument(
+                    name="limit",
+                    description="how many entries to show (default 10).",
+                    usage_example="limit=25",
+                    type=TypesRegistry.require(Types.INT),
+                    required=False,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.log_handler),
+        )
+        return {log.name: log}
+
+    def get_backup(self) -> dict[str, Command]:
+        backup = Command(
+            name="backup",
+            description="snapshot everyone's todo data right now.",
+            usage_example=">todo backup",
+            help_content=(
+                "writes a full copy of todo.json into the backups folder "
+                "(the newest 12 are kept; one also lands automatically "
+                "every 25 mutations). restore them with `>todo restore`."
+            ),
+            arguments=[],
+            subcommands={},
+            binding=NativeBinding(self.backup_handler),
+        )
+        return {backup.name: backup}
+
+    def get_restore(self) -> dict[str, Command]:
+        restore = Command(
+            name="restore",
+            description="list backups, or load one (owner only).",
+            usage_example=">todo restore id=1",
+            help_content=(
+                "without id: lists the saved backups, newest last. with "
+                "id: replaces ALL users' todo data with that backup "
+                "(that's why it's owner-only). the replace itself is "
+                "undo-protected - it snapshots first... for every user, "
+                "so be decisive."
+            ),
+            arguments=[
+                Argument(
+                    name="id",
+                    description="which backup to load (from `>todo restore`).",
+                    usage_example="id=2",
+                    type=TypesRegistry.require(Types.INT),
+                    required=False,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.restore_handler),
+            elevated=True,
+        )
+        return {restore.name: restore}
 
     def get_add(self) -> dict[str, Command]:
         add = Command(
@@ -387,6 +478,90 @@ class TodoCog(Cog):
         )
         return {activate.name: activate}
 
+    async def undo_handler(self, invocation: Invocation):
+        undone = self.todo.undo(invocation.message.author.id)
+        if undone is None:
+            await invocation.message.reply(
+                "nothing to undo - no recorded changes to your lists "
+                "(history keeps the last 30).",
+                mention_author=False,
+            )
+            return
+        actor = undone.get("actor")
+        when = undone.get("at")
+        stamp = time.strftime("%H:%M", time.localtime(when)) if when else "?"
+        who = f" by <@{actor}>" if actor else ""
+        left = len(self.todo.log(invocation.message.author.id, limit=10**6))
+        await invocation.message.reply(
+            f"undid '{undone.get('action')}'{who} (at {stamp}). "
+            f"{left} older change(s) still undoable.",
+            mention_author=False,
+        )
+
+    async def log_handler(self, invocation: Invocation):
+        limit = invocation.arguments.get("limit")
+        limit = int(limit) if limit is not None else 10
+        entries = self.todo.log(invocation.message.author.id, limit=limit)
+        if not entries:
+            await invocation.message.reply(
+                "no recorded changes to your lists yet.", mention_author=False
+            )
+            return
+        lines = []
+        for e in entries:
+            actor = e.get("actor")
+            when = e.get("at")
+            stamp = time.strftime("%m-%d %H:%M", time.localtime(when)) if when else "?"
+            who = f"<@{actor}>" if actor else "?"
+            lines.append(f"{stamp} · {e.get('action')} by {who}")
+        await paginator.paginate(
+            invocation.message,
+            "changes to your lists (newest first):\n" + "\n".join(lines),
+            client=self.context.client,
+        )
+
+    async def backup_handler(self, invocation: Invocation):
+        name = self.todo.backup()
+        total = len(self.todo.backups())
+        await invocation.message.reply(
+            f"backed up everyone's todo data to `{name}` "
+            f"({total} kept, oldest rotate out at 12).",
+            mention_author=False,
+        )
+
+    async def restore_handler(self, invocation: Invocation):
+        ident = invocation.arguments.get("id")
+        names = self.todo.backups()
+        if ident is None:
+            if not names:
+                await invocation.message.reply(
+                    "no backups yet - `>todo backup` makes one, and one "
+                    "lands automatically every 25 mutations.",
+                    mention_author=False,
+                )
+                return
+            lines = [
+                f"{i}: `{name}`" for i, name in enumerate(names, start=1)
+            ]
+            await invocation.message.reply(
+                "backups (newest last - load with `>todo restore id=N`):\n"
+                + "\n".join(lines),
+                mention_author=False,
+            )
+            return
+        if not 1 <= int(ident) <= len(names):
+            await invocation.message.reply(
+                f"id must be 1..{len(names)} - see `>todo restore`.",
+                mention_author=False,
+            )
+            return
+        count = self.todo.restore_backup(names[int(ident) - 1])
+        await invocation.message.reply(
+            f"restored `{names[int(ident) - 1]}` - {count} user(s) of todo "
+            "data are back to that moment.",
+            mention_author=False,
+        )
+
     async def add_handler(self, invocation: Invocation):
         task = invocation.arguments["task"]
         index = self.todo.add_task(invocation.message.author.id, task)
@@ -419,19 +594,13 @@ class TodoCog(Cog):
         lst = lst if lst is not None else ""
         author = invocation.message.author.id if author is None else author
         name, todolist = self.todo.list_tasks(invocation.message.author.id, author, lst)
-        rawtext = "\n".join(
-            f"{i}: '{task.content}'" for i, task in enumerate(todolist.todo)
-        )
-        if not todolist.todo:
-            rawtext = "no tasks."
-        msg = f"**{name}**\n{rawtext}"
-        message = invocation.message
         lines = [f"list '{name}' ({len(todolist.todo)} tasks):"] + [
             f"{i}: {task.content}" for i, task in enumerate(todolist.todo)
         ]
         invocation.chain.out.append("\n".join(lines))
-        for chunk in splitter.split(msg):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, "\n".join(lines), client=self.context.client
+        )
 
     async def list_editors_handler(self, invocation: Invocation):
         lst = invocation.arguments.get("list")
@@ -446,9 +615,9 @@ class TodoCog(Cog):
         if not todolist.editors:
             rawtext = "no editors."
         msg = f"**{name}**\n{rawtext}"
-        message = invocation.message
-        for chunk in splitter.split(msg):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, msg, client=self.context.client
+        )
 
     async def set_editor_handler(self, invocation: Invocation):
         editor = invocation.arguments["user"]
@@ -508,9 +677,9 @@ class TodoCog(Cog):
         rawtext += f"\n> total: {total} tasks."
         if not lists:
             rawtext = "no lists."
-        message = invocation.message
-        for chunk in splitter.split(rawtext):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, rawtext, client=self.context.client
+        )
 
     async def contributions_handler(self, invocation: Invocation):
         contributions = self.todo.list_contributions(invocation.message.author.id)
@@ -523,9 +692,9 @@ class TodoCog(Cog):
         rawtext += f"\n> total: {len(contributions)} contributions"
         if not contributions:
             rawtext = "no contributions."
-        message = invocation.message
-        for chunk in splitter.split(rawtext):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, rawtext, client=self.context.client
+        )
 
     async def activate_handler(self, invocation: Invocation):
         name = invocation.arguments["identifier"]

@@ -127,7 +127,8 @@ class RemoteTtsCog(Cog):
                         required=False,
                     ),
                 ],
-                subcommands=self.get_clone() | self.get_voice() | self.get_queue(),
+                subcommands=self.get_clone() | self.get_voice() | self.get_queue()
+                    | self.get_kill() | self.get_drain(),
                 binding=NativeBinding(handler=self.tts_handler),
             )
         }
@@ -289,6 +290,58 @@ class RemoteTtsCog(Cog):
         }
 
 
+    def get_kill(self) -> dict[str, Command]:
+        return {
+            "kill": Command(
+                name="kill",
+                description="cancel a queued/running cloud job (tts or yt).",
+                usage_example=">tts kill id=18f2a1b4",
+                help_content=(
+                    "kills one job on the manager queue - tts OR yt. the id "
+                    "(or any unique prefix of it) comes from `>tts queue`. "
+                    "the person waiting on it sees it fail as 'cancelled'. "
+                    "everyone can kill for now - be nice."
+                ),
+                arguments=[
+                    Argument(
+                        name="id",
+                        description="job id or its unique prefix.",
+                        usage_example="id=18f2a1b4",
+                        type=TypesRegistry.require(Types.STR),
+                        required=True,
+                    )
+                ],
+                subcommands={},
+                binding=NativeBinding(handler=self.kill_handler),
+            ),
+        }
+
+    def get_drain(self) -> dict[str, Command]:
+        return {
+            "drain": Command(
+                name="drain",
+                description="cancel every queued cloud job (tts and yt).",
+                usage_example=">tts drain inflight=on",
+                help_content=(
+                    "nukes the whole queue. queued jobs die instantly; "
+                    "running ones die too with inflight=on (their workers "
+                    "keep computing, but the result is discarded). use "
+                    "`>tts queue` first to see what you're about to kill."
+                ),
+                arguments=[
+                    Argument(
+                        name="inflight",
+                        description="also cancel jobs already running (off by default).",
+                        usage_example="inflight=on",
+                        type=TypesRegistry.require(Types.BOOL),
+                        required=False,
+                    )
+                ],
+                subcommands={},
+                binding=NativeBinding(handler=self.drain_handler),
+            ),
+        }
+
     async def tts_handler(self, invocation: Invocation):
         self._require_manager()
         text = str(invocation.arguments["text"]).strip()
@@ -303,7 +356,8 @@ class RemoteTtsCog(Cog):
                     or invocation.arguments.get("voice") or "").strip()
         preset = str(invocation.arguments.get("preset") or "").strip() or None
 
-        payload: dict = {"text": text, "preset": preset}
+        payload: dict = {"text": text, "preset": preset,
+                         "requested_by": invocation.message.author.id}
         label = "default voice"
         if voice:
             entry = self._clone_entry(voice)
@@ -498,11 +552,94 @@ class RemoteTtsCog(Cog):
         voices = data.get("voices") or []
         kag_lines = self._kaggle_lines(data.get("kaggle") or {},
                                        bool(workers), data.get("queued") or 0)
+        jobs_block = await self._queue_block()
         await invocation.message.reply(
             f"```\nqueued: {data.get('queued')}\ninflight: {data.get('inflight')}"
             f"\nvoices on manager: {len(voices)}"
-            f"\nworkers:\n{worker_text}{kag_lines}\n```",
+            f"\nworkers:\n{worker_text}{kag_lines}\n```"
+            + (f"\njobs:\n{jobs_block}" if jobs_block else ""),
             mention_author=False,
+        )
+
+    async def _queue_block(self) -> str:
+        """v10.6: the actual jobs sitting on the manager (tts AND yt -
+        one queue), so `>tts queue` answers 'what exactly is stuck' and
+        gives you the ids `>tts kill` wants. best-effort - a manager that
+        doesn't know /api/queue yet just shows nothing."""
+        try:
+            data = await self._call_json("GET", "/api/queue")
+        except _ManagerError:
+            return ""
+        rows: list[str] = []
+        for job in (data.get("queued") or [])[:15]:
+            rows.append(self._job_row(job, "queued"))
+        for job in (data.get("inflight") or [])[:15]:
+            rows.append(self._job_row(job, "inflight"))
+        total_q = len(data.get("queued") or [])
+        total_i = len(data.get("inflight") or [])
+        if not rows:
+            return ""
+        hidden = (total_q + total_i) - len(rows)
+        block = "\n".join(rows)
+        if hidden > 0:
+            block += f"\n...and {hidden} more (killed just the same by `>tts drain`)"
+        return block
+
+    @staticmethod
+    def _job_row(job: dict, state: str) -> str:
+        kind = str(job.get("kind") or "?")
+        jid = str(job.get("id") or "")
+        age = job.get("age")
+        age_s = f"{int(age)}s" if isinstance(age, (int, float)) else "?"
+        preview = str(job.get("preview") or "")[:48]
+        worker = str(job.get("worker") or "")
+        if state == "queued":
+            pos = job.get("position")
+            where = f"pos {pos}" if pos else "?"
+        else:
+            stage = str(job.get("stage") or "")[:24]
+            where = f"{worker[:12]}:{stage}" if worker else stage or "?"
+        return f"- `[{kind}]` `{jid}` {state} ({where}, {age_s}) {preview}"
+
+    async def kill_handler(self, invocation: Invocation):
+        self._require_manager()
+        ident = str(invocation.arguments["id"]).strip()
+        try:
+            result = await self._call_json("DELETE", f"/api/jobs/{ident}")
+        except _ManagerError as e:
+            raise CogError(f"kill failed: {e.message}", is_user_error=True)
+        if result.get("already"):
+            await invocation.message.reply(
+                f"job `{result.get('id') or ident}` already finished "
+                f"({result['already']}) - nothing to kill.",
+                mention_author=False,
+            )
+            return
+        await invocation.message.reply(
+            f"cancelled `[{result.get('kind') or '?'}]` job "
+            f"`{result.get('id') or ident}` 😁",
+            mention_author=False,
+        )
+
+    async def drain_handler(self, invocation: Invocation):
+        self._require_manager()
+        inflight = bool(invocation.arguments.get("inflight"))
+        try:
+            result = await self._call_json(
+                "POST", "/api/queue/drain", {"kill_inflight": inflight}
+            )
+        except _ManagerError as e:
+            raise CogError(f"drain failed: {e.message}", is_user_error=True)
+        killed = result.get("cancelled") or 0
+        running = result.get("inflight_cancelled") or 0
+        if not killed and not running:
+            await invocation.message.reply(
+                "the queue was already empty.", mention_author=False
+            )
+            return
+        note = f" (+{running} running job(s) cancelled)" if running else ""
+        await invocation.message.reply(
+            f"drained {killed} queued job(s){note}.", mention_author=False
         )
     
     def _require_manager(self):

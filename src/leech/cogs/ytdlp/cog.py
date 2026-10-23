@@ -352,6 +352,35 @@ class _ColabLane:
         except json.JSONDecodeError:
             raise _LaneFail("colab", "the manager returned invalid json.")
 
+    async def kill(self, job_id: str) -> dict:
+        """v10.6: cancel one manager job (unique id prefix is fine)."""
+        response = await self._call("DELETE", f"/api/jobs/{job_id}")
+        if response.status_code == 401:
+            raise _LaneFail("colab", "token rejected (LEECH_YT_TOKEN).")
+        if response.status_code >= 400:
+            try:
+                detail = str(response.json().get("detail") or "?")
+            except Exception:  # noqa: BLE001
+                detail = f"manager said {response.status_code}."
+            raise _LaneFail("colab", detail)
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            raise _LaneFail("colab", "the manager returned invalid json.")
+
+    async def drain(self, kill_inflight: bool) -> dict:
+        """v10.6: cancel every queued manager job (tts + yt)."""
+        response = await self._call(
+            "POST", "/api/queue/drain", {"kill_inflight": kill_inflight})
+        if response.status_code == 401:
+            raise _LaneFail("colab", "token rejected (LEECH_YT_TOKEN).")
+        if response.status_code >= 400:
+            raise _LaneFail("colab", f"manager said {response.status_code}.")
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            raise _LaneFail("colab", "the manager returned invalid json.")
+
     async def wake(self, gpu: bool = False) -> dict:
         """ask the manager to wake the kaggle kernel right now (v6)."""
         response = await self._call(
@@ -555,6 +584,48 @@ class YtdlpCog(Cog):
                     subcommands={},
                     binding=NativeBinding(handler=self.wake_handler),
                 ),
+                "kill": Command(
+                    name="kill",
+                    description="cancel a queued/running manager job (yt or tts).",
+                    usage_example=">ytdlp kill id=18f2a1b4",
+                    help_content=(
+                        "same as `>tts kill` - the manager queue holds both "
+                        "kinds. ids (or unique prefixes) come from "
+                        "`>tts queue`, which lists the actual jobs."
+                    ),
+                    arguments=[
+                        Argument(
+                            name="id",
+                            description="job id or its unique prefix.",
+                            usage_example="id=18f2a1b4",
+                            type=TypesRegistry.require(Types.STR),
+                            required=True,
+                        )
+                    ],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.kill_handler),
+                ),
+                "drain": Command(
+                    name="drain",
+                    description="cancel every queued manager job (yt and tts).",
+                    usage_example=">ytdlp drain inflight=on",
+                    help_content=(
+                        "same as `>tts drain` - empties the shared manager "
+                        "queue (both kinds). inflight=on also cancels jobs "
+                        "already running on a worker."
+                    ),
+                    arguments=[
+                        Argument(
+                            name="inflight",
+                            description="also cancel running jobs (off by default).",
+                            usage_example="inflight=on",
+                            type=TypesRegistry.require(Types.BOOL),
+                            required=False,
+                        )
+                    ],
+                    subcommands={},
+                    binding=NativeBinding(handler=self.drain_handler),
+                ),
                 "cookies": Command(
                     name="cookies",
                     description="store a cookies.txt for youtube (attach it).",
@@ -689,6 +760,7 @@ class YtdlpCog(Cog):
                 "invalid clip 'end' has to be after 'start'.",
                 is_user_error=True)
         payload.update(self._cookie_payload())
+        payload["requested_by"] = invocation.message.author.id
 
         note = "yt: audio (mp3)" if payload.get("audio") else \
                f"yt: video ({payload.get('quality') or 720}p)"
@@ -818,6 +890,52 @@ class YtdlpCog(Cog):
                      + ("" if pinned == "auto" else "  (>ytdlp default lane=auto to reset)"))
         lines.append("```")
         await self._reply(invocation.message, "\n".join(lines))
+
+    async def kill_handler(self, invocation: Invocation):
+        """v10.6: cancel one manager job via the colab lane."""
+        lane = self.lanes.get("colab")
+        if lane is None:
+            raise CogError(
+                "the colab/manager lane isn't configured (LEECH_YT_URL).",
+                is_user_error=True,
+            )
+        ident = str(invocation.arguments["id"]).strip()
+        try:
+            result = await lane.kill(ident)
+        except _LaneFail as exc:
+            raise CogError(f"kill failed: {exc.message}", is_user_error=True)
+        if result.get("already"):
+            await self._reply(
+                invocation.message,
+                f"job `{result.get('id') or ident}` already finished "
+                f"({result['already']}) - nothing to kill.")
+            return
+        await self._reply(
+            invocation.message,
+            f"cancelled `[{result.get('kind') or '?'}]` job "
+            f"`{result.get('id') or ident}` 😁")
+
+    async def drain_handler(self, invocation: Invocation):
+        """v10.6: empty the shared manager queue."""
+        lane = self.lanes.get("colab")
+        if lane is None:
+            raise CogError(
+                "the colab/manager lane isn't configured (LEECH_YT_URL).",
+                is_user_error=True,
+            )
+        inflight = bool(invocation.arguments.get("inflight"))
+        try:
+            result = await lane.drain(inflight)
+        except _LaneFail as exc:
+            raise CogError(f"drain failed: {exc.message}", is_user_error=True)
+        killed = result.get("cancelled") or 0
+        running = result.get("inflight_cancelled") or 0
+        if not killed and not running:
+            await self._reply(invocation.message, "the queue was already empty.")
+            return
+        note = f" (+{running} running job(s) cancelled)" if running else ""
+        await self._reply(
+            invocation.message, f"drained {killed} queued job(s){note}.")
 
     async def wake_handler(self, invocation: Invocation):
         lane = self.lanes.get("colab")

@@ -131,6 +131,26 @@ def describe() -> str:
         return current_commit()[:12]
 
 
+def commit_meta() -> dict:
+    """the running commit's message/author/time - `>channel status` shows
+    it, so "what is this build" is answerable without opening a forge.
+    one `git log -1`, split on a \x1f separator (messages can contain
+    anything else)."""
+    try:
+        raw = git("log", "-1", "--pretty=%an\x1f%ci\x1f%s")
+    except RuntimeError:
+        return {}
+    parts = raw.split("\x1f", 2)
+    if len(parts) != 3:
+        return {}
+    author, when, subject = (p.strip() for p in parts)
+    return {
+        "commit_message": subject[:200],
+        "commit_author": author[:80],
+        "commit_time": when[:16],
+    }
+
+
 def notify(text: str) -> None:
     if not WEBHOOK:
         return
@@ -248,6 +268,7 @@ class Supervisor:
             "branch": branch,
             "commit": current_commit(),
             "describe": describe(),
+            **commit_meta(),
             "source": str(SRC_DIR),
             "pinned": self.state.get("pinned"),
             "autopull": bool(self.state.get("autopull", True)),
