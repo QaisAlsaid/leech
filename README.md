@@ -96,7 +96,7 @@ You need git and python 3.14+.
 git clone https://codeberg.org/qais/leech.git
 cd leech
 python -m venv .venv
-source .venv/bin/activate   # windows: .venv\Scripts\activate or .venv\Scripts\activate.ps1
+source .venv/bin/activate   # windows: .venv\Scripts\activate or .venv\Scripts\activate.ps1 on powershell
 pip install -e .
 cp example.env .env         # fill it using the comments
 python -m leech # or run the supervisor via python deploy/supervisor.py
