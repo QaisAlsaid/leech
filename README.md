@@ -6,8 +6,12 @@
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Release](https://img.shields.io/github/v/release/QaisAlsaid/leech?style=for-the-badge&logo=github&label=release)](https://github.com/QaisAlsaid/leech/releases)
 [![License](https://img.shields.io/github/license/QaisAlsaid/leech?style=for-the-badge)](https://github.com/QaisAlsaid/leech/blob/master/LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](YOUR_INVITE_URL)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/2y6r8MuaHy)
 
+</p>
+
+<p align="center">
+  <img src="assets/logo.png" width="150" alt="Leech Logo (Frieren eating Leech)">
 </p>
 
 A Discord bot written in Python. It used to be a parasite, it still is, but also implemented its own cool features.
@@ -16,10 +20,6 @@ It started as a leech: *riding* other bots, running their commands, pressing the
 
 > [!WARNING]
 > Automating user accounts is against Discord's ToS. This project is strictly a proof of concept. And I do not recommend using it.
-
-<p align="center">
-  <img src="assets/logo.png" width="150" alt="Leech Logo (Frieren eating Leech)">
-</p>
 
 ## What Leech is all about
 
