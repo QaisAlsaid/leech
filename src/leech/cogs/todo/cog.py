@@ -105,6 +105,27 @@ class TodoCog(Cog):
         if not self.context.add_command(todo.name, todo):
             raise CogError(f"failed to load '{todo.name}' command.")
         self.command = todo
+
+        remind = Command(
+            name="remind",
+            description="set a one-shot reminder - leech pings you when the time is up.",
+            usage_example='>remind add call mom due="tomorrow 9am"',
+            help_content=(
+                "reminders live on their own 'reminders' list - your "
+                "active list is never touched. when the time is up you "
+                "get pinged here (dm fallback if unreachable): reply "
+                "`done` to finish, `snooze 30m` (or a new time) to push "
+                "it, or `ignore` to keep it. `>remind list` shows what is "
+                "pending. it is the same machinery as `>todo` due dates - "
+                "just a thinner door into it."
+            ),
+            arguments=[],
+            subcommands=self.get_remind_subcommands(),
+            binding=MockBinding(),
+            is_root=True,
+        )
+        if not self.context.add_command(remind.name, remind):
+            raise CogError(f"failed to load '{remind.name}' command.")
         self.context.spawn(self._due_loop(), name="todo-due-loop")
 
     def get_subcommands(self) -> dict[str, Command]:
@@ -123,6 +144,9 @@ class TodoCog(Cog):
             **self.get_lists(),
             **self.get_activate(),
             **self.get_deactivate(),
+            **self.get_tz(),
+            **self.get_exclude(),
+            **self.get_include(),
             **self.get_undo(),
             **self.get_log(),
             **self.get_backup(),
@@ -675,14 +699,34 @@ class TodoCog(Cog):
             )
         return PRIORITY_ALIASES[raw]
 
-    def _parse_due(self, value) -> float | None:
+    def _parse_due(self, value, tz=None) -> float | None:
         raw = str(value or "").strip().strip('"').strip("'").strip()
         if not raw or due_mod.is_clear_token(raw):
             return None
         try:
-            return due_mod.parse_due(raw).epoch
+            return due_mod.parse_due(raw, tz=tz).epoch
         except due_mod.DueError as e:
             raise CogError(str(e), is_user_error=True)
+
+    def _tz_of(self, user: int):
+        """the user's stored tz name, or None (falls back to LEECH_TZ)."""
+        return self.todo.tz_of(user)
+
+    def _render_task_lines(self, todolist, *, tz=None) -> list[str]:
+        lines = []
+        for i, task in self.todo.sorted_tasks(todolist):
+            emote = PRIORITY_EMOTE.get(task.priority or "")
+            lead = f"{emote} " if emote else ""
+            tail = []
+            if task.due is not None:
+                # v10.9: due rides after the task like the priority emote
+                # rides before it - no parentheses wrapper.
+                tail.append(due_mod.format_due(task.due, tz=tz))
+                if task.reminded:
+                    tail.append("🔔 pinged")
+            suffix = f" {' · '.join(tail)}" if tail else ""
+            lines.append(f"{lead}{i}: {task.content}{suffix}")
+        return lines
 
     def _origin_of(self, invocation: Invocation) -> TaskOrigin:
         message = invocation.message
@@ -694,11 +738,13 @@ class TodoCog(Cog):
 
     async def add_handler(self, invocation: Invocation):
         task = invocation.arguments["task"]
+        user = invocation.message.author.id
+        tz = self._tz_of(user)
         priority = self._parse_priority(invocation.arguments.get("priority"))
-        due = self._parse_due(invocation.arguments.get("due"))
+        due = self._parse_due(invocation.arguments.get("due"), tz=tz)
         origin = self._origin_of(invocation) if due is not None else None
         index = self.todo.add_task(
-            invocation.message.author.id,
+            user,
             task,
             priority=priority,
             due=due,
@@ -709,7 +755,7 @@ class TodoCog(Cog):
             notes.append(f"priority {PRIORITY_EMOTE[priority]} {priority}")
         if due is not None:
             notes.append(
-                f"due {due_mod.render(due)} (in {due_mod.humanize(due - time.time())})"
+                f"due {due_mod.render(due, tz=tz)} (in {due_mod.humanize(due - time.time())})"
             )
         suffix = f" ({', '.join(notes)})" if notes else ""
         await invocation.message.reply(f"added task: at index: {index}.{suffix}")
@@ -717,21 +763,23 @@ class TodoCog(Cog):
     async def adds_handler(self, invocation: Invocation):
         tasks_raw = str(invocation.arguments["tasks"])
         tasks = tasks_raw.split("\\")
+        user = invocation.message.author.id
+        tz = self._tz_of(user)
         priority = self._parse_priority(invocation.arguments.get("priority"))
-        due = self._parse_due(invocation.arguments.get("due"))
+        due = self._parse_due(invocation.arguments.get("due"), tz=tz)
         origin = self._origin_of(invocation) if due is not None else None
         indices = []
         for task in tasks:
             indices.append(
                 self.todo.add_task(
-                    invocation.message.author.id,
+                    user,
                     task,
                     priority=priority,
                     due=due,
                     origin=origin,
                 )
             )
-        suffix = f" (priority {priority}, due {due_mod.render(due)})" if priority and due else ""
+        suffix = f" (priority {priority}, due {due_mod.render(due, tz=tz)})" if priority and due else ""
         await invocation.message.reply(
             f"added tasks: at indices: {indices[0]}...{indices[-1]}.{suffix}"
         )
@@ -751,12 +799,13 @@ class TodoCog(Cog):
                     "nothing to update: give task, priority or due.",
                 is_user_error=True,
             )
+        tz = self._tz_of(invocation.message.author.id)
         old = self.todo.update_task(
             invocation.message.author.id,
             index,
             task_arg if task_arg is not None else UNSET,
             priority=self._parse_priority(priority_arg) if priority_arg is not None else UNSET,
-            due=self._parse_due(due_arg) if due_arg is not None else UNSET,
+            due=self._parse_due(due_arg, tz=tz) if due_arg is not None else UNSET,
         )
         await invocation.message.reply(
             f"updated task at: {index} from: '{task_preview(old)}'."
@@ -768,17 +817,221 @@ class TodoCog(Cog):
         lst = lst if lst is not None else ""
         author = invocation.message.author.id if author is None else author
         name, todolist = self.todo.list_tasks(invocation.message.author.id, author, lst)
+        tz = self._tz_of(invocation.message.author.id)
         lines = [f"list '{name}' ({len(todolist.todo)} tasks):"]
-        for i, task in self.todo.sorted_tasks(todolist):
-            emote = PRIORITY_EMOTE.get(task.priority or "")
-            lead = f"{emote} " if emote else ""
-            tail = []
-            if task.due is not None:
-                tail.append(due_mod.format_due(task.due))
-                if task.reminded:
-                    tail.append("pinged")
-            suffix = f" ({', '.join(tail)})" if tail else ""
-            lines.append(f"{lead}{i}: {task.content}{suffix}")
+        lines += self._render_task_lines(todolist, tz=tz)
+        text = "\n".join(lines)
+        invocation.chain.out.append(text)
+        await paginator.paginate(
+            invocation.message, text, client=self.context.client
+        )
+
+    def get_tz(self) -> dict[str, Command]:
+        tz = Command(
+            name="tz",
+            description="set your timezone - due times parse and render in it (fallback: the bot's LEECH_TZ).",
+            usage_example=">todo tz set=Asia/Damascus",
+            help_content=(
+                "times like `tomorrow 9am` or `15:00` are read in YOUR "
+                "timezone once set, and dues you see are rendered in it "
+                "too. unset (set=none) falls back to the bot's LEECH_TZ. "
+                "reminders and todos both use it."
+            ),
+            arguments=[
+                Argument(
+                    name="set",
+                    description="a timezone name like Asia/Damascus (omit to just see your current one).",
+                    usage_example="set=Europe/Berlin",
+                    type=TypesRegistry.require(Types.STR),
+                    required=False,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.tz_handler),
+        )
+        return {tz.name: tz}
+
+    def get_exclude(self) -> dict[str, Command]:
+        exclude = Command(
+            name="exclude",
+            description="keep a list out of the `>todo lists` overall task counter.",
+            usage_example=">todo exclude name=hoard",
+            help_content=(
+                "for hoarding lists you don't want messing with the "
+                "counter: excluded lists still show in `>todo lists` (with "
+                "an `(excluded)` mark) but their tasks stop counting "
+                "towards the total. the list itself works exactly as "
+                "before. undo with `>todo include`."
+            ),
+            arguments=[
+                Argument(
+                    name="identifier",
+                    description="the list identifier to exclude (name or index).",
+                    usage_example="identifier=hoard",
+                    help_content="identifier can either be the list name or its index.",
+                    type=TypesRegistry.require(Types.STR),
+                    required=True,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.exclude_handler),
+        )
+        return {exclude.name: exclude}
+
+    def get_include(self) -> dict[str, Command]:
+        include = Command(
+            name="include",
+            description="count a list's tasks in the `>todo lists` counter again.",
+            usage_example=">todo include name=hoard",
+            help_content="undoes `>todo exclude` - the list's tasks count towards the total again.",
+            arguments=[
+                Argument(
+                    name="identifier",
+                    description="the list identifier to include (name or index).",
+                    usage_example="identifier=hoard",
+                    help_content="identifier can either be the list name or its index.",
+                    type=TypesRegistry.require(Types.STR),
+                    required=True,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.include_handler),
+        )
+        return {include.name: include}
+
+    def get_remind_subcommands(self) -> dict[str, Command]:
+        add = Command(
+            name="add",
+            description="add a reminder that pings you when the time is up.",
+            usage_example='>remind add call mom due="tomorrow 9am"',
+            help_content=(
+                "due accepts 30m, 2h, 1d6h, 15:00, 3:30pm, today 15:00, "
+                "tonight, tomorrow 9am, friday 3pm, 2026-10-24 15:00... "
+                "read in your `>todo tz` timezone (else the bot's)."
+            ),
+            arguments=[
+                Argument(
+                    name="task",
+                    description="what to remind you about.",
+                    usage_example="task=call mom",
+                    type=TypesRegistry.require(Types.STR),
+                    required=True,
+                ),
+                Argument(
+                    name="due",
+                    description="when to ping you (30m, 15:00, tomorrow 9am, 10-24 ...).",
+                    usage_example='due="tomorrow 9am"',
+                    help_content="multi-word times need quotes: due=\"tomorrow 9am\".",
+                    type=TypesRegistry.require(Types.WORD),
+                    required=True,
+                ),
+            ],
+            subcommands={},
+            binding=NativeBinding(self.remind_add_handler),
+        )
+        ls = Command(
+            name="list",
+            description="show pending reminders.",
+            usage_example=">remind list",
+            arguments=[],
+            subcommands={},
+            binding=NativeBinding(self.remind_list_handler),
+        )
+        return {add.name: add, ls.name: ls}
+
+    async def tz_handler(self, invocation: Invocation):
+        user = invocation.message.author.id
+        value = invocation.arguments.get("set")
+        raw = str(value or "").strip().strip('"').strip("'").strip()
+        current = self.todo.tz_of(user)
+        if value is None:
+            if current:
+                body = (
+                    f"your timezone: {current} "
+                    f"(it is {due_mod.render(time.time(), tz=current)} there)."
+                )
+            else:
+                body = (
+                    "your timezone: (unset) - times fall back to the bot's "
+                    f"LEECH_TZ ({due_mod.timezone().key})."
+                )
+            body += "\nset it with `>todo tz set=Asia/Damascus` (set=none clears)."
+            await invocation.message.reply(body, mention_author=False)
+            return
+        if not raw or due_mod.is_clear_token(raw):
+            self.todo.set_tz(user, None)
+            await invocation.message.reply(
+                "cleared - times fall back to the bot's LEECH_TZ.",
+                mention_author=False,
+            )
+            return
+        try:
+            zone = due_mod.valid_tz(raw)
+        except ValueError as e:
+            raise CogError(str(e), is_user_error=True)
+        self.todo.set_tz(user, zone.key)
+        await invocation.message.reply(
+            f"your timezone is now {zone.key} 🌍 "
+            f"(it is {due_mod.render(time.time(), tz=zone.key)} there).",
+            mention_author=False,
+        )
+
+    async def exclude_handler(self, invocation: Invocation):
+        name = self.todo.set_excluded(
+            invocation.message.author.id,
+            invocation.arguments["identifier"],
+            True,
+        )
+        await invocation.message.reply(
+            f"list '{name}' is out of the `>todo lists` counter "
+            "(`>todo include` brings it back).",
+            mention_author=False,
+        )
+
+    async def include_handler(self, invocation: Invocation):
+        name = self.todo.set_excluded(
+            invocation.message.author.id,
+            invocation.arguments["identifier"],
+            False,
+        )
+        await invocation.message.reply(
+            f"list '{name}' counts towards the `>todo lists` total again.",
+            mention_author=False,
+        )
+
+    async def remind_add_handler(self, invocation: Invocation):
+        user = invocation.message.author.id
+        tz = self._tz_of(user)
+        task = invocation.arguments["task"]
+        due = self._parse_due(invocation.arguments["due"], tz=tz)
+        if due is None:
+            raise CogError(
+                "a reminder needs a real due time (like due=30m or "
+                'due="tomorrow 9am").',
+                is_user_error=True,
+            )
+        index = self.todo.add_reminder(
+            user, task, due, self._origin_of(invocation)
+        )
+        await invocation.message.reply(
+            f"reminder {index} set: '{task_preview(task)}' "
+            f"{due_mod.render(due, tz=tz)} "
+            f"(in {due_mod.humanize(due - time.time())}).",
+        )
+
+    async def remind_list_handler(self, invocation: Invocation):
+        user = invocation.message.author.id
+        try:
+            name, todolist = self.todo.list_tasks(user, user, "reminders")
+        except BaseError:
+            await invocation.message.reply(
+                "no reminders yet - set one with "
+                '`>remind add call mom due="tomorrow 9am"`.',
+                mention_author=False,
+            )
+            return
+        lines = [f"reminders ({len(todolist.todo)} pending):"]
+        lines += self._render_task_lines(todolist, tz=self._tz_of(user))
         text = "\n".join(lines)
         invocation.chain.out.append(text)
         await paginator.paginate(
@@ -847,17 +1100,24 @@ class TodoCog(Cog):
     async def lists_handler(self, invocation: Invocation):
         lists = self.todo.list_lists(invocation.message.author.id)
         total = 0
+        excluded_tasks = 0
 
-        def accum(i):
-            nonlocal total
-            total += i
-            return i
-
-        rawtext = "\n".join(
-            f"**{i}**: '{name}', tasks count: {accum(len(lst.todo))}"
-            for i, (name, lst) in enumerate(lists.items())
-        )
-        rawtext += f"\n> total: {total} tasks."
+        rows = []
+        for i, (name, lst) in enumerate(lists.items()):
+            count = len(lst.todo)
+            if lst.excluded:
+                excluded_tasks += count
+                rows.append(f"**{i}**: '{name}', tasks count: {count} (excluded)")
+            else:
+                total += count
+                rows.append(f"**{i}**: '{name}', tasks count: {count}")
+        rawtext = "\n".join(rows)
+        footer = f"\n> total: {total} tasks"
+        if excluded_tasks:
+            footer += f" (+{excluded_tasks} in excluded lists)."
+        else:
+            footer += "."
+        rawtext += footer
         if not lists:
             rawtext = "no lists."
         await paginator.paginate(
@@ -954,6 +1214,7 @@ class TodoCog(Cog):
                 list_name=spec["list"],
                 task_id=spec["task_id"],
                 preview=preview,
+                tz=self._tz_of(origin.user_id),
             )
         except Exception:
             _logger.exception("todo reminder prompt failed")
@@ -967,6 +1228,7 @@ class TodoCog(Cog):
         list_name: str,
         task_id: int | None,
         preview: str,
+        tz=None,
     ) -> None:
         if task_id is None:
             return
@@ -996,6 +1258,7 @@ class TodoCog(Cog):
                     list_name=list_name,
                     task_id=task_id,
                     preview=preview,
+                    tz=tz,
                 )
                 if handled:
                     return
@@ -1011,6 +1274,7 @@ class TodoCog(Cog):
         list_name: str,
         task_id: int,
         preview: str,
+        tz=None,
     ) -> bool:
         actor = reply.author.id
         text = (reply.content or "").strip().lower()
@@ -1031,13 +1295,13 @@ class TodoCog(Cog):
             return True
 
         try:
-            when = due_mod.parse_snooze(text)
+            when = due_mod.parse_snooze(text, tz=tz)
             self.todo.reschedule_task(
                 owner, list_name, task_id, when, actor=actor
             )
             await _say(
                 message,
-                f"pushed '{preview}' to {due_mod.render(when)} "
+                f"pushed '{preview}' to {due_mod.render(when, tz=tz)} "
                 f"(in {due_mod.humanize(when - time.time())}).",
             )
             return True

@@ -25,6 +25,16 @@ def _footer(index: int, total: int, closing: str = "") -> str:
     return f"\n\n`page {index}/{total} · {hint}{tail}`"
 
 
+# v10.9: the footer is navigation chrome for humans. consumers that feed
+# bot messages back into other systems (the ai's command-output harvest)
+# strip it with this instead of reading it as data.
+FOOTER_RE = re.compile(r"\s*`page \d+/\d+ · reply: [^`]*`\s*", re.IGNORECASE)
+
+
+def strip_footer(text: str) -> str:
+    return FOOTER_RE.sub("", text or "").strip()
+
+
 def _pages_of(text: str) -> list[str]:
     return splitter.split(text, PAGE_SIZE)
 

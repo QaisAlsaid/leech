@@ -40,6 +40,30 @@ def timezone() -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def resolve_tz(tz: ZoneInfo | str | None) -> ZoneInfo:
+    """v10.9: per-user timezones. `tz` may be a ZoneInfo, a name like
+    'Asia/Damascus', or None (fall back to LEECH_TZ, then UTC)."""
+    if tz is None:
+        return timezone()
+    if isinstance(tz, ZoneInfo):
+        return tz
+    try:
+        return ZoneInfo(str(tz))
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return timezone()
+
+
+def valid_tz(name: str) -> ZoneInfo:
+    """strict validation for `>todo tz set=...` - raises when unknown."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError) as e:
+        raise ValueError(
+            f"'{name}' is not a timezone i know. examples: Asia/Damascus, "
+            "Europe/Berlin, America/New_York, UTC."
+        ) from e
+
+
 def is_clear_token(text: str) -> bool:
     return (text or "").strip().strip('"').strip("'").lower() in CLEAR_TOKENS
 
@@ -58,16 +82,17 @@ def _strip(text: str) -> str:
     return (text or "").strip().strip('"').strip("'").strip()
 
 
-def _mk(hour: int, minute: int, *, base_day, advance_day: int = 0) -> float:
+def _mk(hour: int, minute: int, *, base_day, advance_day: int = 0, tz: ZoneInfo | None = None) -> float:
     import datetime as dt
 
     day = base_day + dt.timedelta(days=advance_day)
-    local = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=timezone())
+    local = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=resolve_tz(tz))
     return local.timestamp()
 
 
 def _apply_clock(
-    base_day, text: str, *, default_hour=None, what: str, advance_day: int = 0
+    base_day, text: str, *, default_hour=None, what: str, advance_day: int = 0,
+    tz: ZoneInfo | None = None,
 ):
     import datetime as dt
 
@@ -91,14 +116,14 @@ def _apply_clock(
             hour += 12
         elif meridiem == "am" and hour == 12:
             hour = 0
-    return _mk(hour, minute, base_day=base_day, advance_day=advance_day)
+    return _mk(hour, minute, base_day=base_day, advance_day=advance_day, tz=tz)
 
 
-def _parse_clock_today(text: str, now: float) -> float:
+def _parse_clock_today(text: str, now: float, tz: ZoneInfo | None = None) -> float:
     import datetime as dt
 
-    today = dt.datetime.fromtimestamp(now, tz=timezone()).date()
-    stamp = _apply_clock(today, text, default_hour=None, what="that")
+    today = dt.datetime.fromtimestamp(now, tz=resolve_tz(tz)).date()
+    stamp = _apply_clock(today, text, default_hour=None, what="that", tz=tz)
     if stamp <= now:  # already past: assume the next day
         stamp += 86400
     return stamp
@@ -120,24 +145,24 @@ def _parse_relative(text: str, now: float) -> float:
     return now + total
 
 
-def _parse_weekday(word: str, rest: str, now: float) -> float:
+def _parse_weekday(word: str, rest: str, now: float, tz: ZoneInfo | None = None) -> float:
     import datetime as dt
 
     target = _WEEKDAYS[word]
-    today = dt.datetime.fromtimestamp(now, tz=timezone()).date()
+    today = dt.datetime.fromtimestamp(now, tz=resolve_tz(tz)).date()
     delta = (target - today.weekday()) % 7
     stamp = _apply_clock(
-        today + dt.timedelta(days=delta), rest, default_hour=9, what=word
+        today + dt.timedelta(days=delta), rest, default_hour=9, what=word, tz=tz
     )
     if stamp <= now: 
         stamp += 7 * 86400
     return stamp
 
 
-def _parse_date(text: str, rest: str, now: float) -> float:
+def _parse_date(text: str, rest: str, now: float, tz: ZoneInfo | None = None) -> float:
     import datetime as dt
 
-    today = dt.datetime.fromtimestamp(now, tz=timezone()).date()
+    today = dt.datetime.fromtimestamp(now, tz=resolve_tz(tz)).date()
     if _DATE_RE.match(text):
         year, month, day = (int(part) for part in text.split("-"))
         try:
@@ -151,14 +176,16 @@ def _parse_date(text: str, rest: str, now: float) -> float:
         except ValueError:
             raise DueError(f"'{text}' is not a real date.")
         if dt.datetime.combine(
-            base, dt.time(23, 59), tzinfo=timezone()
+            base, dt.time(23, 59), tzinfo=resolve_tz(tz)
         ).timestamp() <= now:
             base = dt.date(today.year + 1, month, day)
-    stamp = _apply_clock(base, rest, default_hour=9, what="that date")
+    stamp = _apply_clock(base, rest, default_hour=9, what="that date", tz=tz)
     return stamp
 
 
-def parse_due(text: str, *, now: float | None = None) -> Due:
+def parse_due(
+    text: str, *, now: float | None = None, tz: ZoneInfo | str | None = None
+) -> Due:
     import datetime as dt
 
     text = _strip(text)
@@ -168,63 +195,65 @@ def parse_due(text: str, *, now: float | None = None) -> Due:
     lowered = text.lower()
 
     if lowered in ("now", "asap"):
-        return Due(now + 60, render(now + 60))
+        return Due(now + 60, render(now + 60, tz=tz))
 
     if lowered in _DAY_WORDS:
-        today = dt.datetime.fromtimestamp(now, tz=timezone()).date()
+        today = dt.datetime.fromtimestamp(now, tz=resolve_tz(tz)).date()
         if lowered == "today":
-            stamp = _apply_clock(today, "", default_hour=None, what="today")
+            stamp = _apply_clock(today, "", default_hour=None, what="today", tz=tz)
         elif lowered == "tonight":
-            stamp = _apply_clock(today, "", default_hour=20, what="tonight")
+            stamp = _apply_clock(today, "", default_hour=20, what="tonight", tz=tz)
         else:  # tomorrow
             stamp = _apply_clock(
-                today, "", default_hour=9, what="tomorrow", advance_day=1
+                today, "", default_hour=9, what="tomorrow", advance_day=1, tz=tz
             )
         if stamp <= now:
             raise DueError(f"'{text}' is already in the past.")
-        return Due(stamp, render(stamp))
+        return Due(stamp, render(stamp, tz=tz))
 
     head, _, rest = lowered.partition(" ")
     if head in _DAY_WORDS and rest:
-        today = dt.datetime.fromtimestamp(now, tz=timezone()).date()
+        today = dt.datetime.fromtimestamp(now, tz=resolve_tz(tz)).date()
         advance = 1 if head == "tomorrow" else 0
         stamp = _apply_clock(
-            today, rest, default_hour=None, what=head, advance_day=advance
+            today, rest, default_hour=None, what=head, advance_day=advance, tz=tz
         )
         if stamp <= now:
             raise DueError(f"'{text}' is already in the past.")
-        return Due(stamp, render(stamp))
+        return Due(stamp, render(stamp, tz=tz))
 
     if head in _WEEKDAYS:
-        return Due(*_with_human(_parse_weekday(head, rest, now)))
+        return Due(*_with_human(_parse_weekday(head, rest, now, tz), tz))
 
     if _REL_PIECE.match(_REL_RE.sub("", lowered).replace(" ", "")) or lowered.startswith("in "):
         epoch = _parse_relative(lowered, now)
-        return Due(epoch, render(epoch))
+        return Due(epoch, render(epoch, tz=tz))
 
     if _CLOCK_RE.match(lowered):
-        epoch = _parse_clock_today(lowered, now)
-        return Due(epoch, render(epoch))
+        epoch = _parse_clock_today(lowered, now, tz)
+        return Due(epoch, render(epoch, tz=tz))
 
     if _DATE_RE.match(head) or _SHORT_DATE_RE.match(head):
-        return Due(*_with_human(_parse_date(head, rest, now)))
+        return Due(*_with_human(_parse_date(head, rest, now, tz), tz))
 
     raise DueError(f"'{text}' is not a due time i understand.")
 
 
-def _with_human(epoch: float) -> tuple[float, str]:
-    return epoch, render(epoch)
+def _with_human(epoch: float, tz: ZoneInfo | str | None = None) -> tuple[float, str]:
+    return epoch, render(epoch, tz=tz)
 
 
-def parse_snooze(text: str, *, now: float | None = None) -> float:
+def parse_snooze(
+    text: str, *, now: float | None = None, tz: ZoneInfo | str | None = None
+) -> float:
     text = _strip(text)
     now = time.time() if now is None else now
     lowered = text.lower()
     if lowered in ("snooze", "later", "+", "snooze me"):
         return now + 3600  # bare snooze = one hour
     if lowered.startswith("snooze ") or lowered.startswith("+"):
-        return parse_snooze(lowered.split(" ", 1)[-1].lstrip("+"), now=now)
-    due = parse_due(lowered, now=now)
+        return parse_snooze(lowered.split(" ", 1)[-1].lstrip("+"), now=now, tz=tz)
+    due = parse_due(lowered, now=now, tz=tz)
     if due.epoch <= now:
         raise DueError("snoozing into the past?")
     return due.epoch
@@ -242,14 +271,16 @@ def humanize(seconds: float) -> str:
     return " ".join(parts) if parts else "0s"
 
 
-def render(epoch: float) -> str:
+def render(epoch: float, tz: ZoneInfo | str | None = None) -> str:
     import datetime as dt
 
-    local = dt.datetime.fromtimestamp(epoch, tz=timezone())
+    local = dt.datetime.fromtimestamp(epoch, tz=resolve_tz(tz))
     return local.strftime("%a %m-%d %H:%M")
 
 
-def format_due(due: float | None, *, now: float | None = None) -> str:
+def format_due(
+    due: float | None, *, now: float | None = None, tz: ZoneInfo | str | None = None
+) -> str:
     if due is None:
         return ""
     now = time.time() if now is None else now
@@ -258,4 +289,4 @@ def format_due(due: float | None, *, now: float | None = None) -> str:
         return f"⚠️ overdue by {humanize(-delta)}"
     if delta < 86400:
         return f"⏰ in {humanize(delta)}"
-    return f"⏰ {render(due)} (in {humanize(delta)})"
+    return f"📅 {render(due, tz=tz)} (in {humanize(delta)})"

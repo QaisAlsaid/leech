@@ -22,7 +22,7 @@ from .service import (
     fmt_duration,
     quality_label,
 )
-import leech.core.helpers.text.splitter as splitter
+import leech.core.helpers.text.paginator as paginator
 
 REPLY_LIMIT = 1990
 LIST_CAP = 10
@@ -283,9 +283,10 @@ class MonoCog(Cog):
 
     async def _send_lines(self, message: discord.Message, lines: list[str]) -> None:
         payload = "\n".join(lines)
-        target = message
-        for chunk in splitter.split(payload):
-            target = await self._reply(target, chunk)
+        # v10.9: one paginated message instead of a splitter chunk spam.
+        await paginator.paginate(
+            message, payload, client=self.context.client
+        )
 
     def _progress_text(self, note: str, job: dict) -> str:
         progress = job.get("progress") or {}

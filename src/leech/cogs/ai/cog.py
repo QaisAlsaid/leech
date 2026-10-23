@@ -18,15 +18,18 @@ from leech.core.ai import schema
 from leech.core.ai.audit import ActionLog
 from leech.core.ai.service import AiError, AiService, Attachment
 from leech.core.helpers.interactions import harvest
+from leech.core.helpers.interactions.reply import ReplySession
 from leech.core.helpers.attachments.attachments import gather_attachments
 import leech.config as config
 from leech.core.error import BaseError
 from leech.core.parser.types.registry import Types, TypesRegistry
-import leech.core.helpers.text.splitter as splitter
+import leech.core.helpers.text.paginator as paginator
 
+import asyncio
 import json
 import logging
 import os
+import re
 
 _logger = logging.getLogger(__name__)
 
@@ -34,10 +37,24 @@ REPLY_LIMIT = 1990
 ATTEMPTS = 3
 MAX_ROUNDS = 3
 MODEL_CALL_BUDGET = 4
+
+# v10.9 AI_OPSEC_3: how long the ai waits on ONE command before letting
+# it run on in the background (ytdlp/tts take minutes; blocking the turn
+# that long starved the read path and bred retries + double replies).
+AI_CMD_TIMEOUT = float(os.getenv("AI_COMMAND_TIMEOUT", "45") or 45)
+# v10.9 AI_OPSEC_4: how long the user has to answer an ask-mode
+# confirmation before it counts as a decline.
+AI_CONFIRM_TIMEOUT = float(os.getenv("AI_CONFIRM_TIMEOUT", "120") or 120)
+CONFIRM_RE = re.compile(
+    r"^\s*(?:yes|y|allow|ok|always|no|n|deny|stop|never)\b", re.IGNORECASE
+)
+CONFIRM_YES = {"yes", "y", "allow", "ok", "sure", "go"}
+CONFIRM_ALWAYS = {"always", "forever"}
+CONFIRM_NO = {"no", "n", "deny", "stop", "cancel"}
+CONFIRM_NEVER = {"never"}
 MAX_ATTACHMENTS = 4
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 
-import re
 import httpx
 from leech.core.helpers.interactions.model import media_kind
 
@@ -236,8 +253,16 @@ class AiCog(Cog):
         return {
             "perms": Command(
                 name="perms",
-                description="configure what i may run for you.",
+                description="configure what i may run for you (allow / deny / ask).",
                 usage_example=">ai perms deny command=todo.discard",
+                help_content=(
+                    "v10.9: delegation is now three states. `allow` runs "
+                    "without asking, `deny` never runs, and `ask` (the "
+                    "default for everything) confirms with you in chat "
+                    "before running - reply yes / always / no / never to "
+                    "those prompts. `always` and `never` are remembered "
+                    "here."
+                ),
                 arguments=[],
                 binding=MockBinding(),
                 subcommands={
@@ -255,8 +280,14 @@ class AiCog(Cog):
                     ),
                     "allow": leaf(
                         "allow",
-                        "reallow a denied command.",
+                        "let the assistant run a command without asking.",
                         self.perms_allow_handler,
+                        [command_arg, user_arg],
+                    ),
+                    "ask": leaf(
+                        "ask",
+                        "confirm with me before running this command (the default).",
+                        self.perms_ask_handler,
                         [command_arg, user_arg],
                     ),
                 },
@@ -277,16 +308,31 @@ class AiCog(Cog):
     async def perms_list_handler(self, invocation: Invocation):
         target = self._delegation_target(invocation)
         entries = self.context.client.security.delegations_of(target)
-        if not entries:
-            await invocation.message.reply(
-                "the assistant may run everything you can (default)."
-            )
-            return
         lines = [
             f"`{scope}`: {'allowed' if allow else 'denied'}"
             for scope, allow in sorted(entries.items())
         ]
-        await invocation.message.reply("\n".join(lines))
+        tail = (
+            "everything else: `ask` - i confirm with you in chat before "
+            "running it (yes / always / no / never)."
+        )
+        if lines:
+            await invocation.message.reply(
+                "\n".join(lines) + f"\n{tail}", mention_author=False
+            )
+        else:
+            await invocation.message.reply(
+                f"no explicit rules yet. {tail}", mention_author=False
+            )
+
+    async def perms_ask_handler(self, invocation: Invocation):
+        target = self._delegation_target(invocation)
+        path = invocation.arguments["command"].strip()
+        self.context.client.security.ask_delegation(target, f"command:{path}")
+        await invocation.message.reply(
+            f"i'll ask <@{target}> before running `{path}` from now on.",
+            mention_author=False,
+        )
 
     async def perms_deny_handler(self, invocation: Invocation):
         target = self._delegation_target(invocation)
@@ -301,7 +347,7 @@ class AiCog(Cog):
         path = invocation.arguments["command"].strip()
         self.context.client.security.allow_delegation(target, f"command:{path}")
         await invocation.message.reply(
-            f"the assistant may run `{path}` for <@{target}> again."
+            f"the assistant may run `{path}` for <@{target}> without asking."
         )
 
     def _require_owner(self, invocation: Invocation) -> None:
@@ -512,7 +558,8 @@ class AiCog(Cog):
 
         if not addressed:
             snippet = await self._reply_snippet(message)
-            self.ai.window(channel_id).push(
+            self.ai.observe(
+                channel_id,
                 message.author.display_name,
                 message.author.id,
                 message.content,
@@ -632,6 +679,25 @@ class AiCog(Cog):
     async def request(
         self, message: discord.Message, content: str, *, dry: bool = False
     ) -> None:
+        """v10.9 AI_OPSEC_2: one resolution at a time per channel. a second
+        request while one runs gets deflected instead of interleaving two
+        resolutions into the same context window."""
+        channel_id = message.channel.id
+        if not await self.ai.begin_resolution(channel_id):
+            await self._reply(
+                message,
+                "i'm still working on the message before this one - "
+                "give me a moment 😁",
+            )
+            return
+        try:
+            await self._request_inner(message, content, dry=dry)
+        finally:
+            self.ai.end_resolution(channel_id)
+
+    async def _request_inner(
+        self, message: discord.Message, content: str, *, dry: bool = False
+    ) -> None:
         channel_id = message.channel.id
         system = schema.system_prompt(
             self.ai.persona(channel_id),
@@ -651,6 +717,14 @@ class AiCog(Cog):
                 if calls >= MODEL_CALL_BUDGET:
                     await self._reply(
                         message, "i hit my thinking budget for this message 😟"
+                    )
+                    # v10.9 AI_OPSEC_1: the model must be told this turn
+                    # died, or the dangling prompt invites a retry later -
+                    # possibly while answering someone else.
+                    self.note(
+                        channel_id,
+                        "(the assistant hit its thinking budget and could not "
+                        "answer the message above. do not retry it.)",
                     )
                     return
                 calls += 1
@@ -678,6 +752,16 @@ class AiCog(Cog):
                     await message.reply(
                         f"i couldn't generate a proper response 😟 details: {e.message}"
                     )
+                    # v10.9 AI_OPSEC_1: record the failure IN the window so
+                    # the model knows that prompt already died once and
+                    # must not be picked up again later - least of all
+                    # while answering a different user.
+                    self.note(
+                        channel_id,
+                        "(the assistant FAILED to answer the message above: "
+                        f"{e.message[:200]}. it already errored out - do not "
+                        "retry it, do not answer it on someone else's turn.)",
+                    )
                     return
                 try:
                     action = schema.AiAction.model_validate_json(
@@ -697,6 +781,11 @@ class AiCog(Cog):
                     note="schema retries exhausted",
                 )
                 await self._reply(message, "i couldn't turn that into a command 😟")
+                self.note(
+                    channel_id,
+                    "(the assistant could not produce a valid response for the "
+                    "message above. do not retry it.)",
+                )
                 return
 
             if not action.commands:
@@ -737,6 +826,38 @@ class AiCog(Cog):
                         note="not in ai catalog",
                     )
                     continue
+
+                # v10.9 AI_OPSEC_4: allow / deny / ask. anything not
+                # explicitly allowed (or denied) gets confirmed with the
+                # user right here, before anything runs.
+                if not dry and self._delegation_mode(
+                    requested.command, message.author.id
+                ) == "ask":
+                    verdict, remembered = await self._confirm_command(
+                        message, requested.command
+                    )
+                    if remembered == "always":
+                        self.context.client.security.allow_delegation(
+                            message.author.id, f"command:{requested.command}"
+                        )
+                    elif remembered == "never":
+                        self.context.client.security.deny_delegation(
+                            message.author.id, f"command:{requested.command}"
+                        )
+                    if not verdict:
+                        results.append(
+                            f"(error) the user did not allow '{requested.command}' - "
+                            "do not run it, do not ask again this turn. say so "
+                            "and move on."
+                        )
+                        self.log.write(
+                            kind="denied",
+                            principal=message.author.id,
+                            command=requested.command,
+                            note="user declined (ask mode)",
+                        )
+                        continue
+
                 try:
                     inner = Invocation.parse(
                         message=message,
@@ -775,7 +896,45 @@ class AiCog(Cog):
                     return
 
                 marker = discord.utils.time_snowflake(discord.utils.utcnow(), high=True)
-                chain = await self.context.client.dispatcher.run(message, inner)
+                # v10.9 AI_OPSEC_3: bound the wait on one command. ytdlp or
+                # tts runs take minutes - blocking the turn that long is
+                # what starved the read path and bred retries/double
+                # replies. past the bound the command keeps running in the
+                # background and its output is noted into the window when
+                # it lands.
+                runner = asyncio.create_task(
+                    self.context.client.dispatcher.run(message, inner)
+                )
+                timed_out = False
+                try:
+                    chain = await asyncio.wait_for(
+                        asyncio.shield(runner), timeout=AI_CMD_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    chain = None
+
+                if timed_out:
+                    results.append(
+                        f"(result) '{requested.command}' is still running in the "
+                        f"background (it takes a while). tell the user it is in "
+                        "progress and that its output will show up on its own - "
+                        "do not run it again."
+                    )
+                    self.log.write(
+                        kind="late",
+                        principal=message.author.id,
+                        command=requested.command,
+                        arguments=requested.arguments,
+                    )
+                    self.context.spawn(
+                        self._late_completion(
+                            message, channel_id, runner, marker, requested.command
+                        ),
+                        name="ai-late-command",
+                    )
+                    continue
+
                 outputs: list[str] = []
                 if chain is not None and chain.out:
                     outputs = [str(entry) for entry in chain.out]
@@ -822,6 +981,86 @@ class AiCog(Cog):
         await self._reply(
             message, "i ran out of rounds 😟\n" + "\n".join(summary[-12:])
         )
+        self.note(
+            channel_id,
+            "(the assistant ran out of command rounds for the message above "
+            "and summarized what it had. nothing is pending - do not resume it.)",
+        )
+
+    def _delegation_mode(self, path: str, user_id: int) -> str:
+        """v10.9 AI_OPSEC_4: 'allow' | 'deny' | 'ask' for a command path."""
+        return self.context.client.security.delegation_mode(
+            user_id, f"command:{path}"
+        )
+
+    async def _confirm_command(
+        self, message: discord.Message, command: str
+    ) -> tuple[bool, str | None]:
+        """v10.9 AI_OPSEC_4: ask the user before an ask-mode command runs.
+        returns (allowed, remembered) where remembered is None | 'always' |
+        'never' - the caller persists the memory."""
+        prompt = await self._reply(
+            message,
+            f"🤖 allow me to run `{command}` for you? reply:\n"
+            "`yes` (this once) · `always` (remember) · `no` (this once) · "
+            "`never` (remember the denial)",
+        )
+        session = ReplySession(
+            self.context.client,
+            message.channel.id,
+            message.author.id,
+            regex=CONFIRM_RE,
+            target_id=prompt.id,
+            name="ai-confirm",
+        )
+        try:
+            reply = await session.next(timeout=AI_CONFIRM_TIMEOUT)
+        finally:
+            session.close()
+        if reply is None:
+            try:
+                await prompt.reply(
+                    "(no answer - taking that as a no.)", mention_author=False
+                )
+            except discord.HTTPException:
+                pass
+            return False, None
+        word = (reply.content or "").strip().lower().split(" ", 1)[0]
+        if word in CONFIRM_ALWAYS:
+            return True, "always"
+        if word in CONFIRM_NEVER:
+            return False, "never"
+        if word in CONFIRM_YES:
+            return True, None
+        return False, None
+
+    async def _late_completion(
+        self,
+        message: discord.Message,
+        channel_id: int,
+        runner: asyncio.Task,
+        marker_id: int,
+        command: str,
+    ) -> None:
+        """v10.9 AI_OPSEC_3: a command that outlived AI_CMD_TIMEOUT finishes
+        here, in the background. its output is noted into the window so the
+        next turn knows it landed (observe() holds it back if another
+        resolution is already running)."""
+        try:
+            await runner
+            outputs = await self.collect_outputs(message, marker_id)
+        except Exception:
+            _logger.exception("ai late command watcher failed")
+            return
+        if not outputs:
+            return
+        joined = " | ".join(line.strip() for line in outputs if line.strip())
+        self.ai.observe(
+            channel_id,
+            "(system)",
+            0,
+            f"(background command `{command}` finished) {joined[:600]}",
+        )
 
     async def collect_outputs(
         self, message: discord.Message, marker_id: int
@@ -833,6 +1072,12 @@ class AiCog(Cog):
             async for msg in message.channel.history(limit=15, after=after):
                 if msg.author.id == me:
                     rendered = harvest(msg).render()
+                    # v10.9 pages x ai: paginated command output carries a
+                    # pager footer ("page 1/3 · reply: next / ...") - it is
+                    # navigation chrome for humans, not command output, and
+                    # the model reading it as data is how the pages system
+                    # "collides" with the ai. strip it.
+                    rendered = paginator.strip_footer(rendered)
                     if rendered:
                         texts.append(rendered)
         except discord.HTTPException:
@@ -880,8 +1125,9 @@ class AiCog(Cog):
             f"(~{len(payload) // 4} tokens)."
         )
         message = invocation.message
-        for chunk in splitter.split("\n".join(lines)):
-            message = await message.reply(chunk)
+        await paginator.paginate(
+            invocation.message, "\n".join(lines), client=self.context.client
+        )
 
     async def status_handler(self, invocation: Invocation):
         channel_id = invocation.message.channel.id

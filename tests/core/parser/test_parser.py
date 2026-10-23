@@ -141,18 +141,105 @@ def test_duplicate_named_argument():
         )
 
 
-def test_unknown_named_argument():
+def test_unknown_named_argument_becomes_positional_text():
+    # v10.8: `fork=hell` where `fork` is not an argument name used to
+    # raise "invalid argument name". it is punctuation the user typed -
+    # fuse it back into the positional text verbatim.
     cmd = command(
         Argument("name", StrType()),
     )
 
-    with pytest.raises(ParseError, match="invalid argument name"):
-        parse(
-            cmd,
-            raw("fork"),
-            assign(),
-            raw("hell"),
-        )
+    result = parse(
+        cmd,
+        raw("fork"),
+        assign(),
+        raw("hell"),
+    )
+
+    assert values(result) == {
+        "name": "fork=hell",
+    }
+
+
+def test_unknown_named_argument_does_not_eat_following_words():
+    # `?x=y z` must come back out as two words, never `?x=yz`.
+    cmd = command(
+        Argument("name", StrType()),
+    )
+
+    result = parse(
+        cmd,
+        raw("a?x"),
+        assign(),
+        raw("y"),
+        raw("z"),
+    )
+
+    assert values(result) == {
+        "name": "a?x=y z",
+    }
+
+
+def test_unknown_named_argument_fuses_each_equals_run():
+    # `?a=1&b=2` lexes as [?a, =, 1&b, =, 2] - all of it is one word.
+    cmd = command(
+        Argument("name", StrType()),
+    )
+
+    result = parse(
+        cmd,
+        raw("p?a"),
+        assign(),
+        raw("1&b"),
+        assign(),
+        raw("2"),
+    )
+
+    assert values(result) == {
+        "name": "p?a=1&b=2",
+    }
+
+
+def test_unknown_named_argument_mixed_with_real_named():
+    # an unquoted url with a query param inside a rest arg, followed by
+    # a REAL named argument: both survive, each intact.
+    cmd = command(
+        Argument("task", StrType()),
+        Argument("due", StrType()),
+    )
+
+    result = parse(
+        cmd,
+        raw("read"),
+        raw("https://site.com/watch?v"),
+        assign(),
+        raw("abc"),
+        raw("due"),
+        assign(),
+        raw("9am"),
+    )
+
+    assert values(result) == {
+        "task": "read https://site.com/watch?v=abc",
+        "due": "9am",
+    }
+
+
+def test_trailing_unknown_assign_without_value_is_text():
+    cmd = command(
+        Argument("name", StrType()),
+    )
+
+    result = parse(
+        cmd,
+        raw("foo"),
+        raw("bar"),
+        assign(),
+    )
+
+    assert values(result) == {
+        "name": "foo bar=",
+    }
 
 
 def test_missing_required_argument():

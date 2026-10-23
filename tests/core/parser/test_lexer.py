@@ -1,6 +1,5 @@
 import pytest
 
-from leech.core.parser.error import LexError
 from leech.core.parser.lexer import Triggers, lex
 from leech.core.parser.token import TokenType
 
@@ -115,14 +114,52 @@ def test_equals_inside_named_quoted_value():
     ]
 
 
-def test_unterminated_double_quote():
-    with pytest.raises(LexError):
-        lex('>foo "hello world', PREFIXES)
+def test_unterminated_double_quote_is_raw_text():
+    # v10.8: a quote with no closing partner is punctuation, not a
+    # string opener - `>todo add say "hello` used to die at lex time.
+    result = lex('>foo say "hello', PREFIXES)
+
+    assert tokens(result) == [
+        (TokenType.RAW, "foo"),
+        (TokenType.RAW, "say"),
+        (TokenType.RAW, '"hello'),
+    ]
 
 
-def test_unterminated_single_quote():
-    with pytest.raises(LexError):
-        lex(">foo 'hello world", PREFIXES)
+def test_unterminated_single_quote_is_raw_text():
+    # the apostrophe in `i mustn't larp` belongs to the word it sits in.
+    result = lex(">todo add i mustn't larp", PREFIXES)
+
+    assert tokens(result) == [
+        (TokenType.RAW, "todo"),
+        (TokenType.RAW, "add"),
+        (TokenType.RAW, "i"),
+        (TokenType.RAW, "mustn't"),
+        (TokenType.RAW, "larp"),
+    ]
+
+
+def test_unmatched_quote_at_end_is_raw_text():
+    result = lex(">foo larp'", PREFIXES)
+
+    assert tokens(result) == [
+        (TokenType.RAW, "foo"),
+        (TokenType.RAW, "larp'"),
+    ]
+
+
+def test_unmatched_quote_leaves_equals_lexing_alone():
+    # `mustn't x=y` - the apostrophe is raw AND the `=` still lexes as
+    # ASSIGN (the parser decides what to do with unknown names).
+    result = lex(">foo mustn't x=y", PREFIXES)
+
+    assert tokens(result) == [
+        (TokenType.RAW, "foo"),
+        (TokenType.RAW, "mustn't"),
+        (TokenType.RAW, "x"),
+        (TokenType.ASSIGN, "="),
+        (TokenType.RAW, "y"),
+    ]
 
 
 @pytest.mark.parametrize(

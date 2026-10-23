@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -12,6 +14,21 @@ class ControlSidecar:
         self.token = (token or "").strip()
         outer = self
 
+        class Server(ThreadingHTTPServer):
+            daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                # a client that hung up mid-request (the channel cog's
+                # httpx timeout, a curl that got bored) used to print a
+                # full BrokenPipeError traceback per occurrence. it is
+                # not an error on our side - swallow the disconnects and
+                # keep serving.
+                exc = sys.exc_info()[1]
+                if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                                    ConnectionAbortedError)):
+                    return
+                super().handle_error(request, client_address)
+
         class Handler(BaseHTTPRequestHandler):
             server_version = "leech-control/1"
 
@@ -20,11 +37,19 @@ class ControlSidecar:
 
             def _send(self, code: int, payload: dict) -> None:
                 body = json.dumps(payload, indent=2).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError, socket.timeout):
+                    # the caller stopped listening (curl --max-time,
+                    # httpx read timeout). the mutation itself still ran
+                    # on the supervisor side - losing the response is the
+                    # correct outcome, not a traceback.
+                    pass
 
             def _body(self) -> dict:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -33,7 +58,7 @@ class ControlSidecar:
                 try:
                     data = json.loads(self.rfile.read(length))
                     return data if isinstance(data, dict) else {}
-                except ValueError:
+                except (ValueError, OSError):
                     return {}
 
             def _authorized(self) -> bool:
@@ -71,9 +96,15 @@ class ControlSidecar:
                         "switch", channel=str(body.get("channel") or ""))
                 elif route == "/pull":
                     result = outer.supervisor.request(
-                        "pull", force=bool(body.get("force")))
+                        "pull",
+                        force=bool(body.get("force")),
+                        commit=str(body.get("commit") or "").strip(),
+                    )
                 elif route == "/revert":
-                    result = outer.supervisor.request("revert")
+                    result = outer.supervisor.request(
+                        "revert",
+                        commit=str(body.get("commit") or "").strip(),
+                    )
                 elif route == "/autopull":
                     result = outer.supervisor.request(
                         "autopull", on=bool(body.get("on")))
@@ -82,9 +113,10 @@ class ControlSidecar:
                 self._send(200, result)
 
         self.handler = Handler
+        self.server_class = Server
 
     def start(self) -> None:
-        server = ThreadingHTTPServer(("0.0.0.0", self.port), self.handler)
+        server = self.server_class(("0.0.0.0", self.port), self.handler)
         thread = threading.Thread(target=server.serve_forever,
                                   name="control-sidecar", daemon=True)
         thread.start()

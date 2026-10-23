@@ -22,7 +22,7 @@ from leech.core.command.runtime import Argument, Command
 from leech.core.command.invocation import Invocation
 from leech.core.parser.types.registry import Types, TypesRegistry
 from leech.core.error import BaseError
-import leech.core.helpers.text.splitter as splitter
+import leech.core.helpers.text.paginator as paginator
 
 _logger = logging.getLogger(__name__)
 
@@ -424,9 +424,10 @@ class LrcCog(Cog):
 
     async def _send_lines(self, message: discord.Message, lines: list[str]) -> None:
         payload = "\n".join(lines)
-        target = message
-        for chunk in splitter.split(payload):
-            target = await self._reply(target, chunk)
+        # v10.9: one paginated message instead of a splitter chunk spam.
+        await paginator.paginate(
+            message, payload, client=self.context.client
+        )
 
     async def _send_code_chunks(self, message: discord.Message, head: str,
                                 text: str, note: str,

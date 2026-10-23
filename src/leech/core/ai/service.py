@@ -803,6 +803,11 @@ class AiService:
         self.muted: set[int] = set()
         self.windows: dict[int, ContextWindow] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+        # v10.9 AI_OPSEC_2: one resolution at a time per channel, and
+        # ambient window writes are held back while it runs.
+        self._resolving: set[int] = set()
+        self._deferred: dict[int, list[tuple[str, int, str, Optional[str]]]] = {}
+        self._resolution_locks: dict[int, asyncio.Lock] = {}
         self._store = store
         self._load()
         if isinstance(self._backend, _DirectBackend):
@@ -844,6 +849,48 @@ class AiService:
             channel_id,
             ContextWindow(limit=self._window_limit, budget=self._window_budget),
         )
+
+    def observe(
+        self,
+        channel_id: int,
+        author: str,
+        author_id: int,
+        content: str,
+        *,
+        reply: Optional[str] = None,
+    ) -> None:
+        """v10.9 AI_OPSEC_2: an ambient window write (someone chatting).
+        while a resolution runs in this channel the turn is held back and
+        lands - in arrival order - once it finishes, so the model never
+        sees other users' messages interleaved into the middle of the
+        turn it is still resolving."""
+        if channel_id in self._resolving:
+            self._deferred.setdefault(channel_id, []).append(
+                (author, author_id, content, reply)
+            )
+            return
+        self.window(channel_id).push(author, author_id, content, reply=reply)
+
+    async def begin_resolution(self, channel_id: int) -> bool:
+        """v10.9: one request() resolution at a time per channel. False =
+        one is already running; the caller deflects politely instead of
+        interleaving a second one into the same window."""
+        lock = self._resolution_locks.setdefault(channel_id, asyncio.Lock())
+        if lock.locked():
+            return False
+        await lock.acquire()
+        self._resolving.add(channel_id)
+        return True
+
+    def end_resolution(self, channel_id: int) -> None:
+        self._resolving.discard(channel_id)
+        pending = self._deferred.pop(channel_id, [])
+        lock = self._resolution_locks.get(channel_id)
+        if lock is not None and lock.locked():
+            lock.release()
+        window = self.window(channel_id)
+        for author, author_id, content, reply in pending:
+            window.push(author, author_id, content, reply=reply)
 
     def set_window_budget(self, chars: int) -> None:
         if chars < 1_000:

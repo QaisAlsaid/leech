@@ -45,13 +45,23 @@ class Security:
             return Decision(False, "the assistant can't touch permissions or sudo.")
         delegated = self._delegation(
             f"user:{user_id}", scope
-        )  # rule 3: per-user, default allow
+        )  # rule 3 (v10.9): per-user, default ASK - the ai cog confirms
+        # with the user before running; only an explicit allow skips the
+        # prompt. dispatch-level this still counts as allowed.
         if delegated is False:
             return Decision(
                 False,
                 f"you haven't allowed the assistant to run '{scope}' (see `>ai perms` 😁).",
             )
         return base
+
+    def delegation_mode(self, user_id: int, scope: str) -> str:
+        """v10.9 AI_OPSEC_4: 'allow' | 'deny' | 'ask' for one scope.
+        missing entry = ask (the new default)."""
+        value = self._delegation(f"user:{user_id}", scope)
+        if value is None:
+            return "ask"
+        return "allow" if value else "deny"
 
     # -- grants (owner-managed) --------------------------------------------------
     def set_grant(self, user_id: int, scope: str, allow: bool) -> None:
@@ -72,12 +82,19 @@ class Security:
     def grants_of(self, user_id: int) -> list[Grant]:
         return [g for g in self.grants if g.actor == f"user:{user_id}"]
 
-    # -- delegation (per-user, default allow) ---------------------------------------
+    # -- delegation (per-user, default ASK since v10.9) -----------------------------
     def deny_delegation(self, user_id: int, scope: str) -> None:
         self.delegations.setdefault(f"user:{user_id}", {})[scope] = False
         self._persist()
 
     def allow_delegation(self, user_id: int, scope: str) -> None:
+        # v10.9: allow is now an explicit stored state (True), not "remove
+        # the deny" - the default flipped from allow to ask.
+        self.delegations.setdefault(f"user:{user_id}", {})[scope] = True
+        self._persist()
+
+    def ask_delegation(self, user_id: int, scope: str) -> None:
+        """back to the v10.9 default: confirm with the user each time."""
         entries = self.delegations.get(f"user:{user_id}", {})
         entries.pop(scope, None)
         if not entries:

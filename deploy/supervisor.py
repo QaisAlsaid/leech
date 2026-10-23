@@ -4,6 +4,7 @@ import atexit
 import json
 import os
 import queue
+import re
 import shlex
 import signal
 import subprocess
@@ -124,11 +125,34 @@ def branch_head(branch: str) -> str:
         return ""
 
 
+def _pyproject_version() -> str:
+    """the version line out of pyproject.toml - the thing canary CI bumps
+    every cycle (`canary: bump 0.7.2-b`). deploy clones only fetch the
+    canary branch, so git tags never show up there and `describe
+    --always` degrades to a bare hash that reads like a semver in
+    `>channel status` (`semver: 3427138`)."""
+    try:
+        text = (HERE.parent / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
 def describe() -> str:
     try:
-        return git("describe", "--tags", "--always", "--dirty")
+        out = git("describe", "--tags", "--always", "--dirty")
     except RuntimeError:
-        return current_commit()[:12]
+        out = current_commit()[:12]
+    if re.fullmatch(r"[0-9a-f]{7,40}", out or ""):
+        # no tag reachable from HEAD (branch-only fetch): pair the
+        # pyproject version with the commit so it is never mistaken
+        # for a semver again.
+        pkg = _pyproject_version()
+        if pkg:
+            return f"{pkg}+g{out[:7]}"
+        return f"untagged-g{out[:7]}"
+    return out
 
 
 def commit_meta() -> dict:
@@ -149,6 +173,40 @@ def commit_meta() -> dict:
         "commit_author": author[:80],
         "commit_time": when[:16],
     }
+
+
+SELF_SOURCES = (HERE / "supervisor.py", HERE / "control.py")
+
+
+def _self_signature() -> str:
+    """hash of the running supervisor's own source files. pulls restart
+    the BOT, never the supervisor - so a supervisor that has been up for
+    weeks keeps executing pre-v10.6 code no matter what the repo says.
+    comparing the signature at status() time turns "why does >channel
+    status not show the commit message" into a one-line answer instead
+    of a mystery."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in SELF_SOURCES:
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def resolve_commit(ref: str) -> str:
+    """anything git understands as a commit (full sha, short sha, tag,
+    branch, origin/branch) -> full sha, else ''. v10.8: >channel
+    pull/revert commit=<ref> goes through here."""
+    ref = (ref or "").strip()
+    if not ref or ref.startswith("-"):
+        return ""
+    try:
+        return git("rev-parse", "--verify", f"{ref}^{{commit}}")
+    except RuntimeError:
+        return ""
 
 
 def notify(text: str) -> None:
@@ -213,6 +271,8 @@ class Supervisor:
         self.backoff = 15.0
         self.last_autopull = 0.0
         self.spawn_failed = False
+        self.self_signature = _self_signature()
+        self._stale_notified = False
 
     def request(self, action: str, **kwargs) -> dict:
         slot: dict = {}
@@ -244,9 +304,12 @@ class Supervisor:
             if action == "switch":
                 return self.switch(str(kwargs.get("channel") or ""))
             if action == "pull":
-                return self.pull(force=bool(kwargs.get("force")))
+                return self.pull(
+                    force=bool(kwargs.get("force")),
+                    commit=str(kwargs.get("commit") or ""),
+                )
             if action == "revert":
-                return self.revert()
+                return self.revert(commit=str(kwargs.get("commit") or ""))
             if action == "autopull":
                 return self.autopull(bool(kwargs.get("on")))
             if action == "shutdown":
@@ -262,6 +325,13 @@ class Supervisor:
         channel = self.state.get("channel", "stable")
         branch = CHANNEL_BRANCHES.get(channel, "?")
         app = self.app
+        stale = _self_signature() != self.self_signature
+        if stale and not self._stale_notified:
+            self._stale_notified = True
+            _log("NOTICE: supervisor.py/control.py changed on disk since "
+                 "this supervisor started - restart it (kill the process, "
+                 "re-run `python deploy/supervisor.py`) to run the new "
+                 "code. the running copy keeps serving until then.")
         return {
             "ok": True,
             "channel": channel,
@@ -269,6 +339,7 @@ class Supervisor:
             "commit": current_commit(),
             "describe": describe(),
             **commit_meta(),
+            "supervisor_stale": stale,
             "source": str(SRC_DIR),
             "pinned": self.state.get("pinned"),
             "autopull": bool(self.state.get("autopull", True)),
@@ -545,10 +616,43 @@ class Supervisor:
         result["commit"] = commit
         return result
 
-    def pull(self, force: bool = False) -> dict:
+    def pull(self, force: bool = False, commit: str = "") -> dict:
         channel = self.state.get("channel", "stable")
         branch = CHANNEL_BRANCHES.get(channel, "master")
         git("fetch", "--all", "--quiet")
+
+        # v10.8: an explicit commit is an operator override - go to THAT
+        # commit even if the branch head is elsewhere, even if the current
+        # commit is marked good, even if the target is on the bad list
+        # (the boot probe still guards the move).
+        if commit:
+            target = resolve_commit(commit)
+            if not target:
+                return {"ok": False,
+                        "error": f"commit '{commit[:40]}' not found - use a "
+                                 f"sha / short sha / tag / branch"}
+            current = current_commit()
+            if target == current:
+                return {"ok": True, "up_to_date": True, "commit": current,
+                        "target": target}
+            pinned = self.state.get("pinned")
+            if pinned:
+                return {"ok": False,
+                        "error": f"pinned to {str(pinned)[:12]} - unpin first"}
+            flagged = target in (self.state.get("bad_commits") or [])
+            if flagged:
+                _log(f"explicit pull to {target[:12]} which is on the bad "
+                     "list - operator override, probe will judge")
+            _log(f"pulling {channel}: explicit target {target[:12]} "
+                 f"(was {current[:12]})")
+            checked = self._checkout(target)
+            result = self._boot_and_probe(f"pull {channel} @ {target[:12]}")
+            result["commit"] = checked
+            result["target"] = target
+            if flagged:
+                result["was_bad_listed"] = True
+            return result
+
         head = branch_head(branch)
         current = current_commit()
         pinned = self.state.get("pinned")
@@ -569,7 +673,28 @@ class Supervisor:
         result["commit"] = commit
         return result
 
-    def revert(self) -> dict:
+    def revert(self, commit: str = "") -> dict:
+        # v10.8: with a commit, revert goes to THAT commit - even when the
+        # current one is marked good, even when it is not last_good. with
+        # none, the classic behavior: back to the last commit that booted
+        # cleanly.
+        if commit:
+            target = resolve_commit(commit)
+            if not target:
+                return {"ok": False,
+                        "error": f"commit '{commit[:40]}' not found - use a "
+                                 f"sha / short sha / tag / branch"}
+            if target == current_commit():
+                return {"ok": True, "already_there": True, "commit": target}
+            _log(f"reverting to explicit target {target[:12]}")
+            checked = self._checkout(target)
+            result = self._boot_and_probe("revert")
+            result["commit"] = checked
+            result["target"] = target
+            notify(f"leech: manual revert to `{target[:12]}` (explicit "
+                   f"target, channel {self.state.get('channel')}).")
+            return result
+
         last_good = self.state.get("last_good")
         if not last_good:
             return {"ok": False, "error": "no last_good commit recorded yet"}

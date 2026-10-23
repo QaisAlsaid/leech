@@ -59,6 +59,7 @@ class Perms(BaseModel):
 class TodoList(BaseModel):
     todo: list[TodoTask] = Field(default_factory=list)
     editors: dict[int, Perms] = Field(default_factory=dict)
+    excluded: bool = False  # v10.9: hoard lists stay out of the `>todo lists` counter
 
 
 class TodoListHandle(BaseModel):
@@ -80,6 +81,12 @@ class TodoContainer(BaseModel):
     author: TodoAuthor
     active: TodoListHandle | None = None
     todo: dict[str, TodoList] = Field(default_factory=dict)
+    # v10.9: postgres jsonb reorders object keys (shortest first, then
+    # bytewise), so the dict above comes back shuffled after every
+    # supabase round-trip. arrays survive jsonb intact - `list_order` is
+    # the durable source of truth for list order. `>todo list 2`-style
+    # numeric indices depend on it too.
+    list_order: list[str] = Field(default_factory=list)
 
     @field_validator("author", mode="before")
     @classmethod
@@ -95,11 +102,26 @@ class TodoContainer(BaseModel):
             return None
         return active
 
+    def model_post_init(self, __context) -> None:
+        reconcile_order(self)
+
 
 container_adapter = TypeAdapter(dict[int, TodoContainer])
 MAX_LIST_NAME = 100
 MAX_TASKS = 1000
 MAX_LISTS = 100
+
+REMINDERS_LIST = "reminders"
+
+
+def reconcile_order(container: TodoContainer) -> None:
+    """keep `list_order` and the `todo` dict agreeing, in that direction:
+    remembered order first (minus deleted lists), never-seen lists
+    appended in dict order, then the dict itself rebuilt in that order."""
+    order = [name for name in container.list_order if name in container.todo]
+    order += [name for name in container.todo if name not in order]
+    container.list_order = order
+    container.todo = {name: container.todo[name] for name in order}
 
 UNDO_KEEP = 30
 BACKUP_EVERY = 25
@@ -108,6 +130,7 @@ BACKUP_KEEP = 12
 NS_TODO = "todo"
 NS_UNDO = "todo_undo"
 NS_BACKUP = "todo_backup"
+NS_PREFS = "user_prefs"
 
 
 class TodoError(BaseError):
@@ -195,6 +218,8 @@ class TodoService:
 
     def backup(self) -> str:
         name = time.strftime("%Y%m%d-%H%M%S")
+        for container in self.containers.values():
+            reconcile_order(container)
         self.store.put(
             NS_BACKUP,
             name,
@@ -238,10 +263,12 @@ class TodoService:
 
     def _persist(self, owner: int) -> None:
         try:
+            container = self.containers[owner]
+            reconcile_order(container)
             self.store.put(
                 NS_TODO,
                 str(owner),
-                self.containers[owner].model_dump(mode="json"),
+                container.model_dump(mode="json"),
             )
         except Exception as e:
             raise TodoError(
@@ -621,6 +648,58 @@ class TodoService:
     def list_lists(self, user: int) -> dict[str, TodoList]:
         user_container = self.ensure_container(user)
         return user_container.todo
+
+    def set_excluded(self, user: int, list_ident: str, excluded: bool) -> str:
+        """v10.9: mark a list as hoard material - it stops counting
+        towards the `>todo lists` total (the list itself stays intact)."""
+        name, lst = self.ensure_list(user, user, list_ident, Perms(write=True))
+        self._snapshot(user, "exclude" if excluded else "include", user)
+        lst.excluded = excluded
+        self._persist(user)
+        return name
+
+    def add_reminder(
+        self, user: int, content: str, due: float, origin: TaskOrigin | None
+    ) -> int:
+        """v10.9: `>remind` - a task on a dedicated `reminders` list that
+        never touches (or needs) the user's active list."""
+        user_container = self.ensure_container(user)
+        lst = user_container.todo.get(REMINDERS_LIST)
+        if lst is None:
+            self._snapshot(user, "create", user)
+            user_container.todo[REMINDERS_LIST] = TodoList()
+            lst = user_container.todo[REMINDERS_LIST]
+        if len(lst.todo) >= MAX_TASKS:
+            raise TodoError(f"reminders list is full (max tasks is {MAX_TASKS}).")
+        self._snapshot(user, "remind", user)
+        lst.todo.append(
+            TodoTask(
+                content=content,
+                author_id=user,
+                id=self._next_task_id(lst),
+                due=_check_due(due),
+                origin=origin,
+            )
+        )
+        self._persist(user)
+        return len(lst.todo) - 1
+
+    # -- per-user prefs (timezone for now) ---------------------------------
+
+    def tz_of(self, user: int) -> str | None:
+        prefs = self.store.get(NS_PREFS, str(user)) or {}
+        name = prefs.get("tz") if isinstance(prefs, dict) else None
+        return str(name) if name else None
+
+    def set_tz(self, user: int, name: str | None) -> None:
+        prefs = self.store.get(NS_PREFS, str(user)) or {}
+        if not isinstance(prefs, dict):
+            prefs = {}
+        if name:
+            prefs["tz"] = name
+        else:
+            prefs.pop("tz", None)
+        self.store.put(NS_PREFS, str(user), prefs)
 
     def list_contributions(self, user: int) -> list[EditorHandle]:
         user_container = self.ensure_container(user)

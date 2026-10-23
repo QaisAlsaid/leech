@@ -14,6 +14,7 @@ from leech.core.command.self.binding import SelfBinding
 from leech.core.parser.types.types import IntType, UserType
 from leech.core.command.invocation import Invocation
 import leech.core.helpers.text.splitter as splitter
+import leech.core.helpers.text.paginator as paginator
 from leech.core.helpers.attachments.attachments import gather_attachments
 from leech.core.command.slash.execution import execute_slash, execute_prefix
 import leech.core.command.resolver as command_resolver
@@ -835,9 +836,10 @@ class CommandCog(Cog):
         if not introspection:
             return
 
-        msg = invocation.message
-        for chunk in splitter.split(introspection):
-            msg = await msg.reply(chunk)
+        # v10.9: one paginated message instead of a splitter chunk spam.
+        await paginator.paginate(
+            invocation.message, introspection, client=self.context.client
+        )
 
     def _build_template_command(self, template: InvokeAlias) -> Command:
         prefix = {"slash": "/", "prefix": "!", "self": ">"}.get(template.type.value, "")

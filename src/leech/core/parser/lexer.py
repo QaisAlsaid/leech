@@ -1,6 +1,5 @@
 import discord
 from enum import Enum, auto
-from .error import LexError
 from .token import Token, TokenType
 
 
@@ -19,7 +18,11 @@ class LexedMessage:
         self.prefix: str | None = prefix
 
 
-def lex_string(raw: str, index: int, char: str) -> tuple[str, TokenType, int]:
+def lex_string(raw: str, index: int, char: str) -> tuple[str, TokenType, int] | None:
+    """scan a quoted string. returns None when the closing quote never
+    comes - the caller then falls back to treating the opener as plain
+    text (v10.8: `>todo add i mustn't larp` used to die on the
+    apostrophe)."""
     out = ""
     index += 1
 
@@ -28,7 +31,7 @@ def lex_string(raw: str, index: int, char: str) -> tuple[str, TokenType, int]:
         index += 1
 
     if index >= len(raw):
-        raise LexError("you have provided an unterminated string")
+        return None
 
     return out, TokenType.STR, index + 1
 
@@ -136,10 +139,16 @@ def lex(
     while i < len(raw):
         char = raw[i]
         match char:
-            case '"':
-                try_append(*lex_string(raw, i, char))
-            case "'":
-                try_append(*lex_string(raw, i, char))
+            case '"' | "'":
+                scanned = lex_string(raw, i, char)
+                if scanned is None:
+                    # no closing partner anywhere in the rest of the
+                    # message: it is not a quote, it is punctuation that
+                    # belongs to the word it sits in (`mustn't`, `say "hi`).
+                    # keep it as raw text and keep lexing from its right.
+                    try_append(char, TokenType.RAW, i + 1)
+                else:
+                    try_append(*scanned)
             case "=":
                 try_append(*lex_assign(raw, i, char))
             case "<":

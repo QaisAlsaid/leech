@@ -74,8 +74,12 @@ class ChannelCog(Cog):
                 "restart. the supervisor checks the code out and respawns "
                 "the app. a boot probe watches the new code for ~75s. if it "
                 "dies, we auto-revert to the last good commit. "
-                "`>channel revert` does that manually. `>channel pull` "
-                "updates to the branch head. `>channel autopoll on/off` "
+                "`>channel revert` does that manually, and "
+                "`>channel revert commit=<sha|tag|branch>` goes to a specific "
+                "commit even when the current one is marked good. "
+                "`>channel pull` updates to the branch head; "
+                "`>channel pull commit=<ref>` goes to a specific commit "
+                "instead of the head. `>channel autopoll on/off` "
                 "controls the automatic pulls.\n"
                 "only the owner can use this."
             ),
@@ -128,7 +132,8 @@ class ChannelCog(Cog):
         return {
             "pull": _leaf(
                 "pull",
-                "pull the channel branch's head and restart.",
+                "pull the channel branch's head and restart "
+                "(or a specific commit with commit=<sha|tag|branch>).",
                 self.pull_handler,
                 [
                     Argument(
@@ -137,7 +142,15 @@ class ChannelCog(Cog):
                         usage_example="force=on",
                         type=TypesRegistry.require(Types.BOOL),
                         required=False,
-                    )
+                    ),
+                    Argument(
+                        name="commit",
+                        description="go to this specific commit instead of "
+                        "the branch head (sha, short sha, tag or branch).",
+                        usage_example="commit=cb9acc49",
+                        type=TypesRegistry.require(Types.WORD),
+                        required=False,
+                    ),
                 ],
                 elevated=True,
             ),
@@ -147,8 +160,20 @@ class ChannelCog(Cog):
         return {
             "revert": _leaf(
                 "revert",
-                "back to the last commit that booted cleanly.",
+                "back to the last commit that booted cleanly, or to a "
+                "specific commit with commit=<sha|tag|branch>.",
                 self.revert_handler,
+                [
+                    Argument(
+                        name="commit",
+                        description="go to this specific commit instead of "
+                        "last_good - works even when the current commit "
+                        "is marked good.",
+                        usage_example="commit=v0.6.0",
+                        type=TypesRegistry.require(Types.WORD),
+                        required=False,
+                    ),
+                ],
                 elevated=True,
             ),
         }
@@ -237,6 +262,13 @@ class ChannelCog(Cog):
             parts.append(f"bad: {', '.join(str(c)[:8] for c in bad)}")
         if page.get("last_error"):
             parts.append(f"last error: {page['last_error'][:120]}")
+        if page.get("supervisor_stale"):
+            parts.append(
+                "supervisor: its own code changed on disk since it started - "
+                "restart it (kill + `python deploy/supervisor.py`) to pick "
+                "up features like the commit message line above. pulls only "
+                "restart the bot, never the supervisor."
+            )
         return "\n".join(parts)
 
     async def status_handler(self, invocation: Invocation):
@@ -282,12 +314,19 @@ class ChannelCog(Cog):
 
     async def pull_handler(self, invocation: Invocation):
         force = bool(invocation.arguments.get("force"))
-        await self._reply(invocation.message, "pulling...")
-        result = await self._call("POST", "/pull", {"force": force})
+        commit = str(invocation.arguments.get("commit") or "").strip()
+        target_hint = f" commit `{commit[:40]}`" if commit else ""
+        await self._reply(
+            invocation.message, f"pulling{target_hint}..."
+        )
+        result = await self._call(
+            "POST", "/pull", {"force": force, "commit": commit}
+        )
         if result.get("up_to_date"):
             await self._reply(
                 invocation.message,
-                f"already up to date (`{str(result.get('commit'))[:12]}`).",
+                f"already on `{str(result.get('commit'))[:12]}`"
+                + (" (the commit you asked for)." if commit else "."),
             )
             return
         if not result.get("ok"):
@@ -302,18 +341,24 @@ class ChannelCog(Cog):
                 f"failed. reverted to `{str(result['reverted_to'])[:12]}`.",
             )
             return
+        note = ""
+        if result.get("was_bad_listed"):
+            note = "\n(that commit was on the bad list - operator override.)"
         await self._reply(
             invocation.message,
             f"pulled to `{str(result.get('commit'))[:12]}`. probe passed, "
-            "running the new code.",
+            f"running the new code.{note}",
         )
 
     async def revert_handler(self, invocation: Invocation):
-        result = await self._call("POST", "/revert", {})
+        commit = str(invocation.arguments.get("commit") or "").strip()
+        result = await self._call("POST", "/revert", {"commit": commit})
         if result.get("already_there"):
             await self._reply(
                 invocation.message,
-                f"already on last good " f"`{str(result.get('commit'))[:12]}`.",
+                f"already on `{str(result.get('commit'))[:12]}`"
+                + (" (the commit you asked for)." if commit
+                   else " - it is the last good one."),
             )
             return
         if not result.get("ok"):
@@ -323,7 +368,9 @@ class ChannelCog(Cog):
             return
         await self._reply(
             invocation.message,
-            f"reverted to `{str(result.get('commit'))[:12]}` and rebooted.",
+            f"reverted to `{str(result.get('commit'))[:12]}` and rebooted."
+            + (" (explicit target - last_good unchanged unless the probe "
+               "passes.)" if commit else ""),
         )
 
     async def autopoll_handler(self, invocation: Invocation):
