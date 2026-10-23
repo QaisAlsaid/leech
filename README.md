@@ -154,6 +154,9 @@ early-ish development:
 
 **[Gölge]()** helped with testing, actually the whole Auth system was created to ban him (joke).
 
+
+## AI usage
+
 > [!NOTE]
 > This project was written using the help of [Z](https://z.ai]), and was audited by me.
 
