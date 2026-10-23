@@ -146,9 +146,13 @@ early-ish development:
 
 ## Credits 
 
-[OpposingFork]() although a bit annoying, but helped a lot in testing, and features, and shaping the bot.
-[mercesmoon](https://linktr.ee/mercesmoon) helped with testing, and png tools shaping.
-[Gölge]() helped with testing, actually the whole Auth system was created to ban him (joke).
+**[OpposingFork]()** although a bit annoying, but helped a lot in testing, and features, and shaping the bot.
+
+
+**[mercesmoon](https://linktr.ee/mercesmoon)** helped with testing, and png tools shaping.
+
+
+**[Gölge]()** helped with testing, actually the whole Auth system was created to ban him (joke).
 
 > [!NOTE]
 > This project was written using the help of [Z](https://z.ai]), and was audited by me.
