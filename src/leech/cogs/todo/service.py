@@ -1,19 +1,53 @@
-from dataclasses import dataclass
-from enum import Enum
-import os
-from pathlib import Path
-import json
-import re
+from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from leech.core.error import BaseError
+from leech.core.store import Store, get_store
 import time
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
-from leech.core.error import BaseError
-from leech.core.cog.error import CogError
+
+UNSET = object() 
+
+PRIORITIES = ("high", "medium", "low")
+PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2, None: 3}
+
+
+def _check_priority(priority) -> str | None:
+    if priority is None:
+        return None
+    text = str(priority).strip().strip('"').strip("'").strip().lower()
+    if text in ("", "none", "null"):
+        return None
+    if text not in PRIORITIES:
+        raise TodoError(f"priority must be high, medium or low (got '{priority}').")
+    return text
+
+
+def _check_due(due) -> float | None:
+    if due is None:
+        return None
+    if isinstance(due, bool) or not isinstance(due, (int, float)):
+        raise TodoError("a due time must be a unix timestamp in seconds.")
+    return float(due)
+
+
+class TaskOrigin(BaseModel):
+    channel_id: int
+    guild_id: int | None = None
+    user_id: int  # who to ping (the adder)
 
 
 class TodoTask(BaseModel):
     content: str
     author_id: int | None = None
+    id: int | None = None          # creation order identity (ms stamp)
+    priority: str | None = None    # high | medium | low | None
+    due: float | None = None       # unix seconds
+    reminded: bool = False         # ping fired (and was answered or given up)
+    origin: TaskOrigin | None = None
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _blank_priority(cls, value):
+        return None if value in ("", "none", "null") else value
 
 
 class Perms(BaseModel):
@@ -67,17 +101,13 @@ MAX_LIST_NAME = 100
 MAX_TASKS = 1000
 MAX_LISTS = 100
 
-# v10.6 safety net: every mutation snapshots the affected container(s)
-# first. snapshots double as the undo ring and the mutation log; a full
-# backup of todo.json lands every BACKUP_EVERY mutations (plus manual
-# ones). this is the "the AI removed tasks from the wrong list at 2am"
-# recovery path - see >todo undo / >todo log / >todo restore.
-UNDO_DIR = Path("persistent/v1/todo/undo")
 UNDO_KEEP = 30
-BACKUP_DIR = Path("persistent/v1/todo/backups")
 BACKUP_EVERY = 25
 BACKUP_KEEP = 12
-BACKUP_NAME_RE = re.compile(r"^\d{8}-\d{6}\.json$")
+
+NS_TODO = "todo"
+NS_UNDO = "todo_undo"
+NS_BACKUP = "todo_backup"
 
 
 class TodoError(BaseError):
@@ -86,22 +116,19 @@ class TodoError(BaseError):
 
 
 class TodoService:
-    def __init__(self):
-        self.path = Path("persistent/v1/todo/todo.json")
-        self.temppath = Path("persistent/v1/todo/todo.json.temp")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.containers: dict[int, TodoContainer] = container_adapter.validate_python(
-            self.load_json()
-        )
+    def __init__(self, store: Store | None = None):
+        self.store = store or get_store()
+        self.containers: dict[int, TodoContainer] = {
+            int(key): (
+                value if isinstance(value, TodoContainer)
+                else TodoContainer.model_validate(value)
+            )
+            for key, value in self.store.items(NS_TODO).items()
+        }
         self._mutations = 0
 
-    # ------------------------------------------------------------ history
 
     def _snapshot(self, actor: int, action: str, *owners: int) -> None:
-        """called BEFORE every mutating operation. writes one undo entry
-        per affected owner container. the entries are also the mutation
-        log (actor + action + time), so `>todo log` answers "who touched
-        my lists" - including when the AI did it through the dispatcher."""
         for owner in dict.fromkeys(o for o in owners if o):
             entry = {
                 "at": round(time.time(), 3),
@@ -112,52 +139,43 @@ class TodoService:
                     if owner in self.containers else None
                 ),
             }
-            directory = UNDO_DIR / str(owner)
-            directory.mkdir(parents=True, exist_ok=True)
             seq = int(time.time() * 1000)
-            path = directory / f"{seq}.json"
-            while path.exists():
+            key = f"{owner}/{seq}"
+            while self.store.get(NS_UNDO, key) is not None:
                 seq += 1
-                path = directory / f"{seq}.json"
-            path.write_text(json.dumps(entry), encoding="utf-8")
-            entries = sorted(directory.glob("*.json"))
+                key = f"{owner}/{seq}"
+            self.store.put(NS_UNDO, key, entry)
+            entries = self._undo_entries(owner)
             for stale in entries[:-UNDO_KEEP]:
-                stale.unlink(missing_ok=True)
+                self.store.delete(NS_UNDO, stale)
         self._mutations += 1
         if self._mutations % BACKUP_EVERY == 0:
             try:
                 self.backup()
             except TodoError:
-                pass  # the mutation itself already persisted; retry next time
+                pass  
 
-    def _undo_entries(self, user: int) -> list[Path]:
-        directory = UNDO_DIR / str(user)
-        if not directory.is_dir():
-            return []
-        return sorted(directory.glob("*.json"))
+    def _undo_entries(self, user: int) -> list[str]:
+        prefix = f"{user}/"
+        return sorted(
+            key for key in self.store.items(NS_UNDO)
+            if key.startswith(prefix)
+        )
 
     def undo(self, user: int) -> dict | None:
-        """restore the invoking user's container to its state before its
-        most recent mutation (whatever/whoever caused it). returns the
-        undone mutation's meta, or None when there's nothing to undo.
-        undoing does NOT push a new snapshot - undoing twice walks two
-        steps back - but the next real mutation prunes the redone path."""
         entries = self._undo_entries(user)
         if not entries:
             return None
-        path = entries[-1]
-        try:
-            entry = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            path.unlink(missing_ok=True)
-            raise TodoError(f"an undo entry was unreadable and got dropped: {e}")
+        key = entries[-1]
+        entry = self.store.get(NS_UNDO, key) or {}
         state = entry.get("state")
         if state is None:
             self.containers.pop(user, None)
+            self.store.delete(NS_TODO, str(user))
         else:
             self.containers[user] = TodoContainer.model_validate(state)
-        self.persist_json()
-        path.unlink(missing_ok=True)
+            self._persist(user)
+        self.store.delete(NS_UNDO, key)
         return {
             "action": entry.get("action") or "?",
             "actor": entry.get("actor"),
@@ -165,13 +183,9 @@ class TodoService:
         }
 
     def log(self, user: int, limit: int = 10) -> list[dict]:
-        """newest-first mutation meta for the user's container."""
         out: list[dict] = []
-        for path in reversed(self._undo_entries(user)[-max(1, limit):]):
-            try:
-                entry = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
+        for key in reversed(self._undo_entries(user)[-max(1, limit):]):
+            entry = self.store.get(NS_UNDO, key) or {}
             out.append({
                 "action": entry.get("action") or "?",
                 "actor": entry.get("actor"),
@@ -180,62 +194,55 @@ class TodoService:
         return out
 
     def backup(self) -> str:
-        """write a full todo.json copy into the backup dir. returns the
-        backup name."""
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        name = time.strftime("%Y%m%d-%H%M%S") + ".json"
-        data = json.dumps(
-            container_adapter.dump_python(self.containers, mode="json"),
-            ensure_ascii=False,
+        name = time.strftime("%Y%m%d-%H%M%S")
+        self.store.put(
+            NS_BACKUP,
+            name,
+            {
+                "containers": container_adapter.dump_python(
+                    self.containers, mode="json"
+                )
+            },
         )
-        (BACKUP_DIR / name).write_text(data, encoding="utf-8")
-        for stale in sorted(BACKUP_DIR.glob("*.json"))[:-BACKUP_KEEP]:
-            stale.unlink(missing_ok=True)
+        for stale in sorted(self.store.items(NS_BACKUP))[:-BACKUP_KEEP]:
+            self.store.delete(NS_BACKUP, stale)
         return name
 
     def backups(self) -> list[str]:
-        if not BACKUP_DIR.is_dir():
-            return []
-        return [p.name for p in sorted(BACKUP_DIR.glob("*.json"))]
+        return sorted(self.store.items(NS_BACKUP))
 
     def restore_backup(self, name: str) -> int:
-        """replace the whole store with a backup (owner-only command -
-        it hits every user's data). returns the containers count."""
-        if not BACKUP_NAME_RE.fullmatch(name or ""):
+        import re
+
+        if not re.fullmatch(r"\d{8}-\d{6}", name or ""):
             raise TodoError(
-                "backup name must look like 20261022-025059.json - pick one "
+                "backup name must look like 20261022-025059. pick one "
                 "from `>todo restore`."
             )
-        path = BACKUP_DIR / name
-        if not path.is_file():
-            raise TodoError(f"no backup named {name} - check `>todo restore`. ")
+        data = self.store.get(NS_BACKUP, name)
+        if not isinstance(data, dict) or "containers" not in data:
+            raise TodoError(f"no backup named {name}. check `>todo restore`. ")
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            containers = container_adapter.validate_python(data)
-        except (OSError, json.JSONDecodeError, ValueError) as e:
+            containers = container_adapter.validate_python(data["containers"])
+        except ValueError as e:
             raise TodoError(f"backup {name} is unreadable: {e}")
         self.containers = containers
-        self.persist_json()
+        live = set(self.store.items(NS_TODO))
+        wanted = {str(owner) for owner in containers}
+        for stale in live - wanted:
+            self.store.delete(NS_TODO, stale)
+        for owner in containers:
+            self._persist(owner)
         return len(containers)
 
-    # ------------------------------------------------------------ mutators
 
-    def load_json(self):
-        if not self.path.exists():
-            return {}
-
-        with self.path.open("r", encoding="utf-8") as file:
-            return json.load(file)
-
-    def persist_json(self):
+    def _persist(self, owner: int) -> None:
         try:
-            with self.temppath.open("w", encoding="utf-8") as file:
-                json.dump(
-                    container_adapter.dump_python(self.containers, mode="json"),
-                    file,
-                )
-
-            os.replace(self.temppath, self.path)
+            self.store.put(
+                NS_TODO,
+                str(owner),
+                self.containers[owner].model_dump(mode="json"),
+            )
         except Exception as e:
             raise TodoError(
                 f"failed to persist data. your edit will not be saved. details: {e}"
@@ -326,15 +333,41 @@ class TodoService:
 
         return name
 
-    def add_task(self, user: int, task: str) -> int:
+    @staticmethod
+    def _next_task_id(lst: TodoList) -> int:
+        task_id = int(time.time() * 1000)
+        while any(task.id == task_id for task in lst.todo):
+            task_id += 1
+        return task_id
+
+    def add_task(
+        self,
+        user: int,
+        task: str,
+        *,
+        priority: str | None = None,
+        due: float | None = None,
+        origin: TaskOrigin | None = None,
+    ) -> int:
         user_container = self.ensure_container(user)
         active = self.ensure_active_list(Perms(write=True), user_container)
         if len(active.todo) >= MAX_TASKS:
             raise TodoError(f"list is full (max tasks is {MAX_TASKS}).")
 
+        priority = _check_priority(priority)
+        due = _check_due(due)
         self._snapshot(user, "add", user_container.active.author_id)
-        active.todo.append(TodoTask(content=task, author_id=user))
-        self.persist_json()
+        active.todo.append(
+            TodoTask(
+                content=task,
+                author_id=user,
+                id=self._next_task_id(active),
+                priority=priority,
+                due=due,
+                origin=origin,
+            )
+        )
+        self._persist(user_container.active.author_id)
         return len(active.todo) - 1
 
     def remove_task(self, user: int, task_index: int) -> str:
@@ -343,10 +376,18 @@ class TodoService:
         self.validate_index(active.todo, task_index)
         self._snapshot(user, "remove", user_container.active.author_id)
         task = active.todo.pop(task_index)
-        self.persist_json()
+        self._persist(user_container.active.author_id)
         return task.content
 
-    def update_task(self, user: int, task_index: int, task: str) -> str:
+    def update_task(
+        self,
+        user: int,
+        task_index: int,
+        task: str | object = UNSET,
+        *,
+        priority: str | None | object = UNSET,
+        due: float | None | object = UNSET,
+    ) -> str:
         user_container = self.ensure_container(user)
         active = self.ensure_active_list(
             Perms(remove=True, write=True, read=True), user_container
@@ -354,9 +395,107 @@ class TodoService:
         self.validate_index(active.todo, task_index)
         self._snapshot(user, "update", user_container.active.author_id)
         old = active.todo[task_index]
-        active.todo[task_index] = TodoTask(content=task, author_id=user)
-        self.persist_json()
+        if priority is not UNSET:
+            priority = _check_priority(priority)
+        if due is not UNSET:
+            due = _check_due(due)
+        updated = old.model_copy(
+            update={
+                "content": task if task is not UNSET else old.content,
+                "priority": priority if priority is not UNSET else old.priority,
+                "due": due if due is not UNSET else old.due,
+                # a moved deadline re-arms the ping
+                "reminded": False if due is not UNSET else old.reminded,
+                "author_id": user,
+            }
+        )
+        active.todo[task_index] = updated
+        self._persist(user_container.active.author_id)
         return old.content
+
+    def _locate(
+        self, owner: int, list_name: str, task_id: int
+    ) -> tuple[str, TodoList, int, TodoTask] | None:
+        container = self.containers.get(owner)
+        if container is None:
+            return None
+        lst = container.todo.get(list_name)
+        if lst is None:
+            return None
+        for index, task in enumerate(lst.todo):
+            if task.id == task_id:
+                return list_name, lst, index, task
+        return None
+
+    def reschedule_task(
+        self, owner: int, list_name: str, task_id: int, due: float, *, actor: int
+    ) -> str:
+        found = self._locate(owner, list_name, task_id)
+        if found is None:
+            raise TodoError("that task is gone: it was removed or the list changed.")
+        _, lst, index, task = found
+        user_container = self.ensure_container(actor)
+        if actor != owner:
+            perms = lst.editors.get(actor)
+            if perms is None or not self.authorize(Perms(write=True), perms):
+                raise TodoError("you are not authorized to edit this list.")
+        due = _check_due(due)
+        self._snapshot(actor, "reschedule", owner)
+        lst.todo[index] = task.model_copy(
+            update={"due": due, "reminded": False}
+        )
+        self._persist(owner)
+        return task_preview_of(task)
+
+    def finish_task(
+        self, owner: int, list_name: str, task_id: int, *, actor: int
+    ) -> str:
+        found = self._locate(owner, list_name, task_id)
+        if found is None:
+            raise TodoError("that task is gone: it was removed or the list changed.")
+        _, lst, index, task = found
+        if actor != owner:
+            perms = lst.editors.get(actor)
+            if perms is None or not self.authorize(Perms(remove=True), perms):
+                raise TodoError("you are not authorized to remove from this list.")
+        self._snapshot(actor, "finish", owner)
+        lst.todo.pop(index)
+        self._persist(owner)
+        return task_preview_of(task)
+
+    def due_ready(self, *, now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        fired: list[dict] = []
+        for owner, container in self.containers.items():
+            for name, lst in container.todo.items():
+                for index, task in enumerate(lst.todo):
+                    if task.due is None or task.reminded or task.due > now:
+                        continue
+                    lst.todo[index] = task.model_copy(update={"reminded": True})
+                    self._persist(owner)
+                    fired.append(
+                        {
+                            "owner": owner,
+                            "list": name,
+                            "task_id": task.id,
+                            "task": task,
+                        }
+                    )
+        return fired
+
+
+    @staticmethod
+    def sorted_tasks(lst: TodoList) -> list[tuple[int, TodoTask]]:
+        ranked = sorted(
+            enumerate(lst.todo),
+            key=lambda pair: (
+                PRIORITY_RANK.get(pair[1].priority, 3),
+                0 if pair[1].due is not None else 1,
+                pair[1].due or 0.0,
+                pair[0],
+            ),
+        )
+        return ranked
 
     def list_tasks(
         self, user: int, author: int, list_ident: str = ""
@@ -392,7 +531,7 @@ class TodoService:
         user_container.todo[list_name] = TodoList()
         if set_active:
             user_container.active = TodoListHandle(author_id=user, name=list_name)
-        self.persist_json()
+        self._persist(user)
         return list_name, list(user_container.todo).index(list_name)
 
     def discard_list(self, user: int, list_ident: str) -> TodoList:
@@ -416,7 +555,7 @@ class TodoService:
             and user_container.active.name == name
         ):
             user_container.active = None
-        self.persist_json()
+        self._persist(user)
         return discarded
 
     def set_editor(self, user: int, editor: int, perms: Perms, list_ident: str = ""):
@@ -447,7 +586,8 @@ class TodoService:
                     handle=TodoListHandle(author_id=user, name=name), perms=perms
                 )
             )
-        self.persist_json()
+        self._persist(user)
+        self._persist(editor)
 
     def remove_editor(self, user: int, editor: int, list_ident: str = ""):
         if user == editor:
@@ -473,7 +613,8 @@ class TodoService:
             if handle.handle.author_id == user and handle.handle.name == name:
                 editor_in.pop(i)
                 break
-        self.persist_json()
+        self._persist(user)
+        self._persist(editor)
         if has_err:
             raise TodoError(f"user: <@{editor}> isn't even an editor to begin with 😁")
 
@@ -490,10 +631,15 @@ class TodoService:
         name, lst = self.ensure_list(user, author, list_ident, Perms(read=True))
         self._snapshot(user, "activate", user)
         user_container.active = TodoListHandle(author_id=author, name=name)
-        self.persist_json()
+        self._persist(user)
 
     def deactivate_list(self, user: int):
         user_container = self.ensure_container(user)
         self._snapshot(user, "deactivate", user)
         user_container.active = None
-        self.persist_json()
+        self._persist(user)
+
+
+def task_preview_of(task: TodoTask, limit: int = 25) -> str:
+    content = task.content
+    return content if len(content) < limit else f"{content[:limit - 3]}..."

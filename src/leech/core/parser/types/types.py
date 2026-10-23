@@ -86,6 +86,20 @@ class StrType(TypeDefinition):
         return raw
 
 
+class WordType(TypeDefinition):
+    def __init__(self):
+        super().__init__(
+            type=Types.WORD,
+            description="a single word (quote it for spaces).",
+            cardinality=Cardinality.ONE,
+            usage_example="priority=high",
+            help_content="one word, no spaces. use a quoted string for anything longer.",
+        )
+
+    def parse(self, raw: str, arg: Argument) -> str:
+        return raw
+
+
 class UserType(TypeDefinition):
     def __init__(self):
         super().__init__(

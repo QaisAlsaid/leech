@@ -33,36 +33,6 @@ class Parser:
 
         raise ParseError("you have provided too many arguments")
 
-    # def current(self) -> Argument:
-    #     for index in range(self.current_positional_index, len(self.context.arguments)):
-    #         arg = self.context.arguments[index]
-    #
-    #         if arg.name in self.resolved:
-    #             continue
-    #
-    #         has_default = arg.name in self.context.defaults
-    #         effectively_optional = not arg.required or has_default
-    #
-    #         later_required = any(
-    #             candidate.required
-    #             and candidate.name not in self.resolved
-    #             and candidate.name not in self.context.defaults
-    #             for candidate in self.context.arguments[index + 1 :]
-    #         )
-    #
-    #         if effectively_optional and later_required:
-    #             continue
-    #
-    #         self.current_positional_index = index
-    #         return arg
-    #
-    #     raise ParseError("you have provided too many arguments")
-    #
-    # def current(self):
-    #    if self.current_positional_index >= len(self.context.arguments):
-    #        raise ParseError("you have provided too many arguments")
-    #    return self.context.arguments[self.current_positional_index]
-
     def is_last_argument(self, remaining: list[Token], arg: Argument):
         others = [
             desc
@@ -85,24 +55,6 @@ class Parser:
 
         return True
 
-    # def is_last_argument(self, remaining: list[Token], arg: Argument):
-    #     if len(self.resolved) + 1 >= len(self.context.arguments):
-    #         return True
-    #
-    #     for token in remaining:
-    #         if token.type == TokenType.ASSIGN:
-    #             return False
-    #
-    #     for desc in self.context.arguments:
-    #         if (
-    #             desc.required
-    #             and desc.name not in self.resolved
-    #             and desc.name not in self.context.defaults
-    #         ):
-    #             return False
-    #     return True
-    #
-
     def parse_named(
         self,
         name: Token,
@@ -124,6 +76,11 @@ class Parser:
 
         if type is None:
             raise ParseError("invalid typename.", is_user_error=False)
+
+        if remaining[1].type == TokenType.STR:
+            raw = remaining[1].raw
+            index += 2
+            return index, type.parse(raw, arg)
 
         if type.cardinality == Cardinality.MANY:
             end = 2

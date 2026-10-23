@@ -8,6 +8,7 @@ class Types(str, Enum):
     NUM = "num"
     BOOL = "bool"
     STR = "str"
+    WORD = "word"
     USER = "user"
     ROLE = "role"
     CHANNEL = "channel"
