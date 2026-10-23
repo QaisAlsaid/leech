@@ -29,7 +29,8 @@ It started as a leech: *riding* other bots, running their commands, pressing the
 - `>ai` - chat (mentions, replies, or direct `>ai talk`), agentic mode: when a request maps to a command it runs it, with per-user delegation rules (`allow` / `deny` / `ask`, default `ask` - it confirms with you in chat before running anything), personas per channel, a context window it actually remembers, and an audit log of everything it did
 - `>tts` - voice clips and voice clones through the manager queue
 - `>ytdlp` - downloads with lanes (colab / hub), default-lane pinning, queue cancel, cookies override support
-- `>mono` - music search (flac track links work without the hub), `>lrc` - lyrics with synced/plain preference and zip mode
+- `>mono` - music search (flac track links work without the hub)
+- `>lrc` - lyrics with synced/plain preference and zip mode
 - `>png` - image compression
 - long outputs are paginated with `next / prev / <number> / stop` replies instead of spam, and the pager footer never leaks into the AI's context
 
