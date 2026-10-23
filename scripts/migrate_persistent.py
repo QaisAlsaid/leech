@@ -7,6 +7,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 DOC_NAMESPACES = ("ai_config", "lrc_config", "channel")
 
