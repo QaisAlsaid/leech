@@ -139,7 +139,9 @@ A few things **deliberately** stay local: tts voice clone files (and their catal
 ## Status
 
 early-ish development:
+
 **canary** branch sits around `v0.8.x`. It moves, and occasionally breaks. 
+
 **master** branch falls a bit behind canary but is generally a bit more stable. 
 
 ## Credits 
@@ -148,7 +150,7 @@ early-ish development:
 [mercesmoon](https://linktr.ee/mercesmoon) helped with testing, and png tools shaping.
 [Gölge]() helped with testing, actually the whole Auth system was created to ban him (joke).
 
-> ![NOTE]
+> [!NOTE]
 > This project was written using the help of [Z](https://z.ai]), and was audited by me.
 
 ## License
