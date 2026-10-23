@@ -60,7 +60,9 @@ It started as a leech: *riding* other bots, running their commands, pressing the
 Every command goes through the same typed parser.
 
 `>todo add wake up at 9am due="tomorrow"` is lexed, parsed into typed arguments, matched against the command registry, and dispatched.
+
 Cogs are namespaces of handlers and services. The cog manager handles hot reloading without leaking resources.
+
 Services persist through the store layer and never touch files directly.
 
 ## Repo layout
