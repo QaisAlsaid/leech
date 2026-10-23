@@ -85,10 +85,8 @@ def collect(v1: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[d
             try:
                 record = json.loads(buffer, strict=False)
             except json.JSONDecodeError:
-                if len(buffer) > 100_000:
-                    print(
-                        f"  ! dropping an unparseable actions.jsonl chunk: {buffer[:60]}"
-                    )
+                if len(buffer) > 100_000:  # runaway garbage - give up on it
+                    print(f"  ! dropping an unparseable actions.jsonl chunk: {buffer[:60]}")
                     buffer = ""
                 continue
             logs.append(record)
@@ -121,9 +119,34 @@ def collect(v1: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[d
     return kv, docs, logs
 
 
+def collect_v2(v2: Path) -> tuple[dict[str, dict[str, Any]], list[dict]]:
+    kv: dict[str, dict[str, Any]] = {}
+    logs: list[dict] = []
+    if not v2.is_dir():
+        return kv, logs
+    for path in sorted(v2.glob("*.json")):
+        ns = path.stem
+        data = read_json(path)
+        if isinstance(data, dict) and data:
+            kv[ns] = {str(key): value for key, value in data.items()}
+    for path in sorted(v2.glob("*.jsonl")):
+        ns = path.stem
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line, strict=False)
+            except json.JSONDecodeError:
+                print(f"  ! dropping an unparseable {path.name} line: {line[:60]}")
+                continue
+            if isinstance(record, dict):
+                logs.append({"__ns__": ns, "row": record})
+    return kv, logs
+
+
 def make_store(backend: str):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from leech.core.store import Store, reset_store
+    from leech.core.store import Store, reset_store 
 
     os.environ["LEECH_STORE"] = backend
     if backend == "json" and "LEECH_STORE_DIR" not in os.environ:
@@ -131,8 +154,7 @@ def make_store(backend: str):
     reset_store()
     from leech.core.store import get_store
 
-    return get_store(sync=True)  # blocking writes: no flusher thread
-
+    return get_store(sync=True) 
 
 def wipe(store, kv: dict, docs: dict) -> int:
     removed = 0
@@ -153,7 +175,12 @@ def write(store, kv: dict, docs: dict, logs: list[dict]) -> int:
         store.put_doc(ns, value)
         written += 1
     for record in logs:
-        store.append_log("ai_log", record)
+        ns = record.pop("__ns__", None) if isinstance(record, dict) else None
+        if isinstance(ns, str):
+            row = record.get("row", record)
+            store.append_log(ns, row)
+        else:
+            store.append_log("ai_log", record)
         written += 1
     return written
 
@@ -178,26 +205,31 @@ def main() -> int:
         description="migrate persistent/v1 into the v10.7 store."
     )
     parser.add_argument(
-        "--from",
-        dest="source",
-        default="persistent/v1",
+        "--from", dest="source", default="persistent/v1",
         help="v1 tree to read (default: persistent/v1)",
     )
     parser.add_argument(
-        "--backend",
-        choices=("json", "supabase"),
-        default=None,
+        "--backend", choices=("json", "supabase"), default=None,
         help="store backend (default: LEECH_STORE env, else json)",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
+        "--dry-run", action="store_true",
         help="collect and report only - write nothing",
     )
     parser.add_argument(
-        "--wipe",
-        action="store_true",
+        "--wipe", action="store_true",
         help="delete existing keys in target namespaces before writing",
+    )
+    parser.add_argument(
+        "--include-v2", action="store_true",
+        help="overlay rows from the v10.7 json store on top of the v1 "
+        "data - for going supabase after running v10.7 on json. v2 keys "
+        "win; v2 log rows are appended.",
+    )
+    parser.add_argument(
+        "--v2-from", default=None,
+        help="where the v10.7 json store lives (default: LEECH_STORE_DIR "
+        "env, else persistent/v2) - the overlay source, NOT the target",
     )
     args = parser.parse_args()
 
@@ -207,6 +239,18 @@ def main() -> int:
         return 1
 
     kv, docs, logs = collect(v1)
+
+    v2_rows = 0
+    if args.include_v2:
+        v2 = Path(args.v2_from or os.getenv("LEECH_STORE_DIR")
+                  or "persistent/v2")
+        overlay, v2_logs = collect_v2(v2)
+        for ns, rows in overlay.items():
+            kv.setdefault(ns, {}).update(rows)
+            v2_rows += len(rows)
+        if v2_logs:
+            logs.extend(v2_logs)
+            v2_rows += len(v2_logs)
 
     total = sum(len(rows) for rows in kv.values()) + len(docs) + len(logs)
     if not total:
@@ -221,6 +265,9 @@ def main() -> int:
     if logs:
         print(f"  {'ai_log':<20} {len(logs):>5} row(s)")
     print(f"  {'TOTAL':<20} {total:>5}")
+    if args.include_v2 and v2_rows:
+        print(f"  (includes {v2_rows} row(s) overlaid from the v10.7 json "
+              f"store - v2 wins on key conflicts)")
 
     if args.dry_run:
         print("dry run - nothing written.")
