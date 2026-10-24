@@ -63,7 +63,6 @@ DONE_WORDS = {"done", "d", "finish", "complete", "delete", "del", "remove"}
 IGNORE_WORDS = {"ignore", "skip", "stop", "cancel", "keep", "dismiss"}
 SNOOZE_WORDS = {"snooze", "later"}
 
-
 def task_preview(task: str) -> str:
     return f"{task if len(task) < TASK_PREVIEW else f'{task[:TASK_PREVIEW - 3]}...'}"
 

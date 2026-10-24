@@ -150,7 +150,7 @@ early-ish development:
 
 ## Credits 
 
-**[OpposingFork]()** although a bit annoying, but helped a lot in testing, and features, and shaping the bot.
+**[OpposingFork](https://youtube.com/c/OpposingFork)** although a bit annoying, but helped a lot in testing, and features, and shaping the bot.
 
 
 **[mercesmoon](https://linktr.ee/mercesmoon)** helped with testing, and png tools shaping.
