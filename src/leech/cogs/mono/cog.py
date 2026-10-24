@@ -91,33 +91,39 @@ class MonoCog(Cog):
         if not self.context.add_command(root.name, root):
             raise CogError(f"i failed to load '{root.name}' command.")
 
-
     def get_track(self) -> dict[str, Command]:
         return {
             "track": _group(
-                "track", "track commands.", {
+                "track",
+                "track commands.",
+                {
                     "search": _leaf(
-                        "search", "find tracks by name.",
+                        "search",
+                        "find tracks by name.",
                         self.track_search_handler,
-                        [Argument(
-                            name="name",
-                            description="the track name.",
-                            usage_example="name=moonlapse vertigo",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="name",
+                                description="the track name.",
+                                usage_example="name=moonlapse vertigo",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "download": _leaf(
                         "download",
                         "download a track by id or name (first match).",
                         self.track_download_handler,
-                        [Argument(
-                            name="query",
-                            description="a monochrome track id, or a name.",
-                            usage_example="query=166617220766674944",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="query",
+                                description="a monochrome track id, or a name.",
+                                usage_example="query=166617220766674944",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                 },
             )
@@ -126,41 +132,50 @@ class MonoCog(Cog):
     def get_album(self) -> dict[str, Command]:
         return {
             "album": _group(
-                "album", "album commands.", {
+                "album",
+                "album commands.",
+                {
                     "search": _leaf(
-                        "search", "find albums by name.",
+                        "search",
+                        "find albums by name.",
                         self.album_search_handler,
-                        [Argument(
-                            name="name",
-                            description="the album name.",
-                            usage_example="name=still life",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="name",
+                                description="the album name.",
+                                usage_example="name=still life",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "view": _leaf(
                         "view",
                         "an album's tracklist + artwork, by id or name.",
                         self.album_view_handler,
-                        [Argument(
-                            name="query",
-                            description="a monochrome release id, or a name.",
-                            usage_example="query=ghost reveries",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="query",
+                                description="a monochrome release id, or a name.",
+                                usage_example="query=ghost reveries",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "download": _leaf(
                         "download",
                         "download an album (zip) by id or name (first match).",
                         self.album_download_handler,
-                        [Argument(
-                            name="query",
-                            description="a monochrome release id, or a name.",
-                            usage_example="query=blessed he with boils",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="query",
+                                description="a monochrome release id, or a name.",
+                                usage_example="query=blessed he with boils",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                 },
             )
@@ -169,30 +184,36 @@ class MonoCog(Cog):
     def get_artist(self) -> dict[str, Command]:
         return {
             "artist": _group(
-                "artist", "artist commands.", {
+                "artist",
+                "artist commands.",
+                {
                     "search": _leaf(
                         "search",
                         "an artist's popular tracks and albums, with ids.",
                         self.artist_search_handler,
-                        [Argument(
-                            name="name",
-                            description="the artist name.",
-                            usage_example="name=opeth",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="name",
+                                description="the artist name.",
+                                usage_example="name=opeth",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "find": _leaf(
                         "find",
                         "search for artists - lists several matches.",
                         self.artist_find_handler,
-                        [Argument(
-                            name="query",
-                            description="the artist name (or a fragment).",
-                            usage_example="query=pink floyd",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="query",
+                                description="the artist name (or a fragment).",
+                                usage_example="query=pink floyd",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                 },
             )
@@ -201,7 +222,9 @@ class MonoCog(Cog):
     def get_config(self) -> dict[str, Command]:
         return {
             "config": _group(
-                "config", "configure your monochrome settings (per user).", {
+                "config",
+                "configure your monochrome settings (per user).",
+                {
                     "show": _leaf(
                         "show", "show your settings.", self.config_show_handler
                     ),
@@ -209,53 +232,61 @@ class MonoCog(Cog):
                         "quality",
                         "set your download quality.",
                         self.config_quality_handler,
-                        [Argument(
-                            name="value",
-                            description="flac (original, instant link), mp3 "
-                                        "kbps (320 256 192 128 96 64), wav, "
-                                        "m4a, opus, copy.",
-                            usage_example="value=320",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="value",
+                                description="flac (original, instant link), mp3 "
+                                "kbps (320 256 192 128 96 64), wav, "
+                                "m4a, opus, copy.",
+                                usage_example="value=320",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "lyrics": _leaf(
                         "lyrics",
                         "how should lyrics be downloaded (if any)",
                         self.config_lyrics_handler,
-                        [Argument(
-                            name="value",
-                            description="'off', 'embed' (inside the file's tags) "
-                                        "or 'sidecar' (a separate .lrc/.txt).",
-                            usage_example="value=sidecar",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="value",
+                                description="'off', 'embed' (inside the file's tags) "
+                                "or 'sidecar' (a separate .lrc/.txt).",
+                                usage_example="value=sidecar",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "lyrics-prefer": _leaf(
                         "lyrics-prefer",
                         "synced (.lrc, timestamps) or plain lyrics.",
                         self.config_lyrics_prefer_handler,
-                        [Argument(
-                            name="value",
-                            description="'synced' or 'plain'.",
-                            usage_example="value=synced",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="value",
+                                description="'synced' or 'plain'.",
+                                usage_example="value=synced",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "zip": _leaf(
                         "zip",
                         "album downloads: one zip, or loose files.",
                         self.config_zip_handler,
-                        [Argument(
-                            name="value",
-                            description="'on' (one zip, default) or 'off' "
-                                        "(every track as its own link).",
-                            usage_example="value=off",
-                            type=TypesRegistry.require(Types.STR),
-                            required=True,
-                        )],
+                        [
+                            Argument(
+                                name="value",
+                                description="'on' (one zip, default) or 'off' "
+                                "(every track as its own link).",
+                                usage_example="value=off",
+                                type=TypesRegistry.require(Types.STR),
+                                required=True,
+                            )
+                        ],
                     ),
                     "reset": _leaf(
                         "reset", "back to defaults.", self.config_reset_handler
@@ -267,13 +298,15 @@ class MonoCog(Cog):
     def get_status(self) -> dict[str, Command]:
         return {
             "status": _leaf(
-                "status", "search probe + leech hub health.",
+                "status",
+                "search probe + leech hub health.",
                 self.status_handler,
             )
         }
 
-    async def _reply(self, message: discord.Message, text: str,
-                     file: "discord.File | None" = None) -> discord.Message:
+    async def _reply(
+        self, message: discord.Message, text: str, file: "discord.File | None" = None
+    ) -> discord.Message:
         return await message.reply(
             text[:REPLY_LIMIT],
             file=file,
@@ -284,9 +317,7 @@ class MonoCog(Cog):
     async def _send_lines(self, message: discord.Message, lines: list[str]) -> None:
         payload = "\n".join(lines)
         # v10.9: one paginated message instead of a splitter chunk spam.
-        await paginator.paginate(
-            message, payload, client=self.context.client
-        )
+        await paginator.paginate(message, payload, client=self.context.client)
 
     def _progress_text(self, note: str, job: dict) -> str:
         progress = job.get("progress") or {}
@@ -301,8 +332,9 @@ class MonoCog(Cog):
             text += f": {progress['note']}"
         return text[:REPLY_LIMIT]
 
-    async def _run_job(self, message: discord.Message, job_id: str, note: str,
-                       timeout: float) -> tuple[dict, discord.Message]:
+    async def _run_job(
+        self, message: discord.Message, job_id: str, note: str, timeout: float
+    ) -> tuple[dict, discord.Message]:
         status_msg = await self._reply(message, f"{note} - queued...")
         last_stage = ""
         last_edit = 0.0
@@ -313,7 +345,9 @@ class MonoCog(Cog):
             if state == "done":
                 return dict(job.get("result") or {}), status_msg
             if state == "error":
-                raise MonoError(str(job.get("error") or "the job failed on the runner."))
+                raise MonoError(
+                    str(job.get("error") or "the job failed on the runner.")
+                )
             stage = self._progress_text(note, job)
             now = time.monotonic()
             if stage != last_stage and now - last_edit >= PROGRESS_MIN_SECS:
@@ -379,19 +413,25 @@ class MonoCog(Cog):
         self.mono.require_server()
         note = f"downloading {title} ({quality_label(quality)})"
         job_id = await self.mono.submit_track(track, quality, lyrics_cfg)
-        result, status_msg = await self._run_job(invocation.message, job_id, note,
-                                                 TRACK_JOB_TIMEOUT)
-        await self._finish(status_msg,
-                           self._track_final(track, result, quality, lyrics_cfg))
+        result, status_msg = await self._run_job(
+            invocation.message, job_id, note, TRACK_JOB_TIMEOUT
+        )
+        await self._finish(
+            status_msg, self._track_final(track, result, quality, lyrics_cfg)
+        )
 
-    async def _sidecar_attachment(self, track: dict,
-                                  lyrics_cfg: dict) -> "discord.File | None":
+    async def _sidecar_attachment(
+        self, track: dict, lyrics_cfg: dict
+    ) -> "discord.File | None":
         try:
             artists = track.get("artists") or []
             lyrics = await self.mono.lyrics_get(
-                ", ".join(artists), track.get("title") or "",
-                track.get("album"), track.get("duration"),
-                lyrics_cfg["prefer"])
+                ", ".join(artists),
+                track.get("title") or "",
+                track.get("album"),
+                track.get("duration"),
+                lyrics_cfg["prefer"],
+            )
         except MonoError:
             return None
         if not lyrics.get("found") or lyrics.get("instrumental"):
@@ -402,13 +442,14 @@ class MonoCog(Cog):
         artists = track.get("artists") or []
         base = ", ".join(artists) or "lyrics"
         title = track.get("title") or "track"
-        safe = "".join(c if c not in '\\/:*?"<>|' else "_"
-                       for c in f"{base} - {title}")
-        return discord.File(io.BytesIO(text.encode("utf-8")),
-                            filename=f"{safe[:120]}.{ext}")
+        safe = "".join(c if c not in '\\/:*?"<>|' else "_" for c in f"{base} - {title}")
+        return discord.File(
+            io.BytesIO(text.encode("utf-8")), filename=f"{safe[:120]}.{ext}"
+        )
 
-    def _track_final(self, track: dict, result: dict | None, quality: str,
-                     lyrics_cfg: dict) -> str:
+    def _track_final(
+        self, track: dict, result: dict | None, quality: str, lyrics_cfg: dict
+    ) -> str:
         title = track.get("title") or f"track {track['id']}"
         artists = ", ".join(track.get("artists") or []) or "?"
         head = f"**{title}** - {artists}"
@@ -437,7 +478,6 @@ class MonoCog(Cog):
             lines.append(f"[artwork]({artwork})")
         return "\n".join(lines)
 
-
     async def album_search_handler(self, invocation: Invocation):
         name = invocation.arguments["name"]
         result = await self.mono.search(name)
@@ -455,8 +495,9 @@ class MonoCog(Cog):
             )
         if len(releases) > LIST_CAP:
             lines.append(f"...(+{len(releases) - LIST_CAP} more)")
-        lines.append("try `>mono album download <id or name>` "
-                     "or peek with `>mono album view`")
+        lines.append(
+            "try `>mono album download <id or name>` " "or peek with `>mono album view`"
+        )
         await self._send_lines(invocation.message, lines)
 
     async def album_view_handler(self, invocation: Invocation):
@@ -501,21 +542,29 @@ class MonoCog(Cog):
             return
         self.mono.require_server()
         title = release.get("title") or f"album {release['id']}"
-        note = (f"zipping {title} ({quality_label(quality)})" if zip_on else
-                f"pulling {title} loose ({quality_label(quality)})")
-        job_id = await self.mono.submit_album(release, quality, lyrics_cfg,
-                                              zip_enabled=zip_on)
-        result, status_msg = await self._run_job(invocation.message, job_id, note,
-                                                 ALBUM_JOB_TIMEOUT)
+        note = (
+            f"zipping {title} ({quality_label(quality)})"
+            if zip_on
+            else f"pulling {title} loose ({quality_label(quality)})"
+        )
+        job_id = await self.mono.submit_album(
+            release, quality, lyrics_cfg, zip_enabled=zip_on
+        )
+        result, status_msg = await self._run_job(
+            invocation.message, job_id, note, ALBUM_JOB_TIMEOUT
+        )
         head, extra = self._album_final(release, result, lyrics_cfg)
         await self._finish(status_msg, head)
         if extra:
             await self._send_lines(invocation.message, extra)
 
-    def _album_final(self, release: dict, result: dict,
-                     lyrics_cfg: dict | None = None) -> "tuple[str, list[str]]":
+    def _album_final(
+        self, release: dict, result: dict, lyrics_cfg: dict | None = None
+    ) -> "tuple[str, list[str]]":
         title = result.get("title") or release.get("title") or "album"
-        artists = ", ".join(result.get("artists") or release.get("artists") or []) or "?"
+        artists = (
+            ", ".join(result.get("artists") or release.get("artists") or []) or "?"
+        )
         head = f"**{title}** - {artists}"
         if result.get("year") or release.get("year"):
             head += f" · {result.get('year') or release.get('year')}"
@@ -527,8 +576,11 @@ class MonoCog(Cog):
             head += f" · {result['size'] / 1e6:.1f} mb"
         lines = [head]
 
-        files = [f for f in (result.get("files") or [])
-                 if isinstance(f, dict) and f.get("url")]
+        files = [
+            f
+            for f in (result.get("files") or [])
+            if isinstance(f, dict) and f.get("url")
+        ]
         if files:
             head += f" · {len(files)} files"
             extra: list[str] = [f"files ({len(files)}):"]
@@ -552,8 +604,10 @@ class MonoCog(Cog):
                 if lyrics_cfg.get("mode") == "embed":
                     lines.append(f"lyrics: embedded in {lyrics_found}/{total} files")
                 elif lyrics_cfg.get("mode") == "sidecar":
-                    lines.append(f"lyrics: {lyrics_found}/{total} tracks came with "
-                                 "a .lrc/.txt in the zip")
+                    lines.append(
+                        f"lyrics: {lyrics_found}/{total} tracks came with "
+                        "a .lrc/.txt in the zip"
+                    )
 
         artwork = result.get("artwork") or release.get("artwork")
         if artwork:
@@ -563,9 +617,12 @@ class MonoCog(Cog):
         if failed:
             shown = ", ".join(
                 f"{_fail_pos(f)} {_fail_title(f)} ({str(f.get('error') or 'failed')[:60]})"
-                for f in failed[:8])
-            note = f"{len(failed)} track{'s' if len(failed) != 1 else ''} failed " \
-                   f"(retried, then skipped): {shown}"
+                for f in failed[:8]
+            )
+            note = (
+                f"{len(failed)} track{'s' if len(failed) != 1 else ''} failed "
+                f"(retried, then skipped): {shown}"
+            )
             if len(failed) > 8:
                 note += f" ...(+{len(failed) - 8} more)"
             extra.append(note)
@@ -573,14 +630,15 @@ class MonoCog(Cog):
             extra.append(f"note: {result['zip_fallback']}")
 
         if not files:
-            titles = [t.get("title") for t in (result.get("tracks") or []) if t.get("title")]
+            titles = [
+                t.get("title") for t in (result.get("tracks") or []) if t.get("title")
+            ]
             if titles:
                 shown = " · ".join(titles[:10])
                 if len(titles) > 10:
                     shown += f" · ...(+{len(titles) - 10})"
                 extra.append(f"tracks: {shown}")
         return "\n".join(lines), extra
-
 
     async def artist_search_handler(self, invocation: Invocation):
         name = invocation.arguments["name"]
@@ -616,7 +674,6 @@ class MonoCog(Cog):
             lines.append(f"…(+{len(releases) - ARTIST_CAP} albums)")
         await self._send_lines(invocation.message, lines)
 
-
     async def artist_find_handler(self, invocation: Invocation):
         query = invocation.arguments["query"]
         result = await self.mono.search(query)
@@ -627,8 +684,7 @@ class MonoCog(Cog):
             key = clean.lower()
             if not key or len(key) > 80:
                 return
-            row = rows.setdefault(
-                key, {"name": clean, "tracks": 0, "releases": 0})
+            row = rows.setdefault(key, {"name": clean, "tracks": 0, "releases": 0})
             row[kind] += 1
 
         for track in result["tracks"]:
@@ -652,14 +708,19 @@ class MonoCog(Cog):
                 row["id"] = artist.get("id")
                 row["username"] = artist.get("username")
             else:
-                ranked.insert(0, {"name": str(artist.get("name") or "?"),
-                                  "tracks": 0, "releases": 0,
-                                  "id": artist.get("id"),
-                                  "username": artist.get("username")})
+                ranked.insert(
+                    0,
+                    {
+                        "name": str(artist.get("name") or "?"),
+                        "tracks": 0,
+                        "releases": 0,
+                        "id": artist.get("id"),
+                        "username": artist.get("username"),
+                    },
+                )
 
         if not ranked:
-            await self._reply(
-                invocation.message, f"no artist matched {query!r}.")
+            await self._reply(invocation.message, f"no artist matched {query!r}.")
             return
 
         lines = [f"artists matching **{query}**:"]
@@ -679,16 +740,18 @@ class MonoCog(Cog):
             lines.append(" ".join(parts))
         if len(ranked) > FIND_CAP:
             lines.append(f"...(+{len(ranked) - FIND_CAP} more)")
-        lines.append("view one with `>mono artist search <name>` "
-                     "(or `>mono album view <name>`).")
+        lines.append(
+            "view one with `>mono artist search <name>` "
+            "(or `>mono album view <name>`)."
+        )
         await self._send_lines(invocation.message, lines)
-
 
     async def config_show_handler(self, invocation: Invocation):
         user_id = invocation.message.author.id
         settings = self.mono.config(user_id)
         server = (
-            f"set ({self.mono.server_url})" if self.mono.server_configured
+            f"set ({self.mono.server_url})"
+            if self.mono.server_configured
             else "not set. jobs and lyrics off, only flac links will work"
         )
         quality = settings.get("quality", "flac")
@@ -720,13 +783,14 @@ class MonoCog(Cog):
         )
 
     async def config_lyrics_handler(self, invocation: Invocation):
-        self.mono.set_config(invocation.message.author.id,
-                             "lyrics_mode", invocation.arguments["value"])
+        self.mono.set_config(
+            invocation.message.author.id, "lyrics_mode", invocation.arguments["value"]
+        )
         cfg = self.mono.lyrics_cfg(invocation.message.author.id)
         explain = {
             "off": "no lyrics with downloads.",
             "embed": "lyrics get written into the file's tags (jobs, even for flac).",
-            "sidecar": "a separate .lrc/.txt alongside the music files."
+            "sidecar": "a separate .lrc/.txt alongside the music files.",
         }[cfg["mode"]]
         await self._reply(
             invocation.message,
@@ -734,14 +798,18 @@ class MonoCog(Cog):
         )
 
     async def config_lyrics_prefer_handler(self, invocation: Invocation):
-        self.mono.set_config(invocation.message.author.id,
-                             "lyrics_prefer", invocation.arguments["value"])
+        self.mono.set_config(
+            invocation.message.author.id, "lyrics_prefer", invocation.arguments["value"]
+        )
         cfg = self.mono.lyrics_cfg(invocation.message.author.id)
         await self._reply(
             invocation.message,
             f"lyrics preference: {cfg['prefer']}"
-            + (" (.lrc with timestamps)" if cfg["prefer"] == "synced"
-               else " (plain text)"),
+            + (
+                " (.lrc with timestamps)"
+                if cfg["prefer"] == "synced"
+                else " (plain text)"
+            ),
         )
 
     async def config_zip_handler(self, invocation: Invocation):
@@ -750,9 +818,12 @@ class MonoCog(Cog):
         zip_on = self.mono.album_zip(user_id)
         await self._reply(
             invocation.message,
-            ("album downloads come as one zip again." if zip_on else
-             "album downloads now come loose - every track gets its own "
-             "link (+ a lyrics link when sidecars are on)."),
+            (
+                "album downloads come as one zip again."
+                if zip_on
+                else "album downloads now come loose - every track gets its own "
+                "link (+ a lyrics link when sidecars are on)."
+            ),
         )
 
     async def config_reset_handler(self, invocation: Invocation):
@@ -762,7 +833,6 @@ class MonoCog(Cog):
             "config reset - quality flac, lyrics sidecar (prefer synced), "
             "album zip on.",
         )
-
 
     async def status_handler(self, invocation: Invocation):
         lines = ["mono:"]

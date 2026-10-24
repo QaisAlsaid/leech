@@ -2,7 +2,9 @@ import pytest
 
 from leech.core.command.dispatcher import CommandDispatcher
 from leech.core.command.registry import CommandRegistry
-from leech.core.command.invocation import Invocation   # v10: Invocation lives here, not in runtime
+from leech.core.command.invocation import (
+    Invocation,
+)  # v10: Invocation lives here, not in runtime
 from leech.core.command.runtime import Command
 from leech.core.command.native.binding import NativeBinding
 from leech.core.parser.token import Token, TokenType
@@ -11,13 +13,13 @@ from leech.core.parser.token import Token, TokenType
 class FakeMessage:
     def __init__(self):
         self.replies = []
-        self.channel = None          # v10: dispatcher typing-pulse reads message.channel
+        self.channel = None  # v10: dispatcher typing-pulse reads message.channel
 
     async def reply(self, content, mention_author=False):
         self.replies.append((content, mention_author))
 
 
-class FakeCogs:                        # v10: dispatcher consults client.cogs.on_message
+class FakeCogs:  # v10: dispatcher consults client.cogs.on_message
     async def on_message(self, message):  # when tokens don't resolve to a command
         return False, None
 

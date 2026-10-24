@@ -38,15 +38,15 @@ VOICES_STORE = TTS_STORE / "voices.json"
 SAMPLE_MAX_BYTES = int(os.getenv("LEECH_TTS_SAMPLE_MAX_MB", "20")) * 1024 * 1024
 URL_RE = re.compile(r"https?://\S+")
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
-MIN_SAMPLE_SECONDS = 5.2 
-TRIM_SECONDS = 20  
+MIN_SAMPLE_SECONDS = 5.2
+TRIM_SECONDS = 20
 
 MANAGER = (os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
 TOKEN = (os.getenv("LEECH_TTS_TOKEN") or "").strip()
 TIMEOUT = float(os.getenv("LEECH_TTS_TIMEOUT", "600") or 600)
 MAX_CHARS = int(os.getenv("LEECH_TTS_MAX_CHARS", "2000") or 2000)
 POLL_SECS = 3.0
-MIN_UPDATE_SECS = 8.0 
+MIN_UPDATE_SECS = 8.0
 UPLOAD_LIMIT = 10 * 1024 * 1024
 
 
@@ -62,7 +62,6 @@ class RemoteTtsCog(Cog):
         super().__init__(context=context)
         self.context.add_on_load(self.load)
         self.voices: dict[str, dict] = {}  # name -> {"file": str, "text": str|None}
-
 
     async def load(self):
         VOICES_DIR.mkdir(parents=True, exist_ok=True)
@@ -85,9 +84,7 @@ class RemoteTtsCog(Cog):
             if not self.context.add_command(name, command):
                 raise CogError(f"i failed to load '{name}' tts command.")
         if not MANAGER:
-            _logger.warning(
-                "remote tts: LEECH_TTS_URL is not set  `>tts` unavilable."
-            )
+            _logger.warning("remote tts: LEECH_TTS_URL is not set  `>tts` unavilable.")
 
     def get_tts(self) -> dict[str, Command]:
         return {
@@ -127,8 +124,11 @@ class RemoteTtsCog(Cog):
                         required=False,
                     ),
                 ],
-                subcommands=self.get_clone() | self.get_voice() | self.get_queue()
-                    | self.get_kill() | self.get_drain(),
+                subcommands=self.get_clone()
+                | self.get_voice()
+                | self.get_queue()
+                | self.get_kill()
+                | self.get_drain(),
                 binding=NativeBinding(handler=self.tts_handler),
             )
         }
@@ -193,13 +193,12 @@ class RemoteTtsCog(Cog):
             "save": Command(
                 name="save",
                 description="save a voice sample as a named clone.",
-                usage_example='>tts voice save name=qais_1',
-                help_content=
-                    "the sample comes from this message's attachment or a "
-                    "media link in it or the message you replied to. it "
-                    "**must** be longer than 5 seconds. pass `transcript=(with what's said in the clip)` "
-                    "for the best clone quality. without it the worker "
-                    "**TRIES** transcribes the sample itself. (WHISPER COULD FAIL AND CAUSE THE WORKER TO CRASH).",
+                usage_example=">tts voice save name=qais_1",
+                help_content="the sample comes from this message's attachment or a "
+                "media link in it or the message you replied to. it "
+                "**must** be longer than 5 seconds. pass `transcript=(with what's said in the clip)` "
+                "for the best clone quality. without it the worker "
+                "**TRIES** transcribes the sample itself. (WHISPER COULD FAIL AND CAUSE THE WORKER TO CRASH).",
                 arguments=[
                     Argument(
                         name="name",
@@ -289,7 +288,6 @@ class RemoteTtsCog(Cog):
             )
         }
 
-
     def get_kill(self) -> dict[str, Command]:
         return {
             "kill": Command(
@@ -352,12 +350,16 @@ class RemoteTtsCog(Cog):
                 f"text is {len(text)} chars, keep it under {MAX_CHARS}.",
                 is_user_error=True,
             )
-        voice = str(invocation.arguments.get("vc")
-                    or invocation.arguments.get("voice") or "").strip()
+        voice = str(
+            invocation.arguments.get("vc") or invocation.arguments.get("voice") or ""
+        ).strip()
         preset = str(invocation.arguments.get("preset") or "").strip() or None
 
-        payload: dict = {"text": text, "preset": preset,
-                         "requested_by": invocation.message.author.id}
+        payload: dict = {
+            "text": text,
+            "preset": preset,
+            "requested_by": invocation.message.author.id,
+        }
         label = "default voice"
         if voice:
             entry = self._clone_entry(voice)
@@ -368,7 +370,9 @@ class RemoteTtsCog(Cog):
                 label = f"clone `{voice}`"
             payload["voice"] = voice
 
-        await self._run_job(invocation, payload, label, name=f"tts-{voice or 'default'}")
+        await self._run_job(
+            invocation, payload, label, name=f"tts-{voice or 'default'}"
+        )
 
     async def clone_handler(self, invocation: Invocation):
         self._require_manager()
@@ -434,9 +438,13 @@ class RemoteTtsCog(Cog):
             name, await self._to_opus_async(wav), seconds, transcript or None
         )
         note = "" if pushed else " (cloud push failed. try `>tts voice sync` later)"
-        warn = "" if transcript else (
-            " · no transcript. the worker will transcribe it itself "
-            "(ALLOW_WHISPER=1)"
+        warn = (
+            ""
+            if transcript
+            else (
+                " · no transcript. the worker will transcribe it itself "
+                "(ALLOW_WHISPER=1)"
+            )
         )
         await invocation.message.reply(
             f"saved voice `{name}`"
@@ -473,11 +481,13 @@ class RemoteTtsCog(Cog):
     async def voice_sync_handler(self, invocation: Invocation):
         self._require_manager()
         if not self.voices:
-            await invocation.message.reply("nothing to sync. no saved clones 😁",
-                                           mention_author=False)
+            await invocation.message.reply(
+                "nothing to sync. no saved clones 😁", mention_author=False
+            )
             return
-        status = await invocation.message.reply("syncing clones to the manager...",
-                                                mention_author=False)
+        status = await invocation.message.reply(
+            "syncing clones to the manager...", mention_author=False
+        )
         ok, failed = 0, []
         for name, entry in sorted(self.voices.items()):
             wav_path = VOICES_DIR / entry["file"]
@@ -521,12 +531,17 @@ class RemoteTtsCog(Cog):
         # v9: the pixeldrain flag from the manager - answers "is the key
         # even set there" without opening vercel.
         if "pixeldrain" in kag:
-            bits.append("pixeldrain" if kag.get("pixeldrain")
-                        else "pixeldrain: NO KEY on manager")
+            bits.append(
+                "pixeldrain"
+                if kag.get("pixeldrain")
+                else "pixeldrain: NO KEY on manager"
+            )
         out = f"\nkaggle: {' · '.join(bits)}"
         if queued and not has_workers:
-            out += ("\nhint: jobs waiting + no worker -> the next >tts awakes "
-                    "the kernel.")
+            out += (
+                "\nhint: jobs waiting + no worker -> the next >tts awakes "
+                "the kernel."
+            )
         return out
 
     async def voice_ping_handler(self, invocation: Invocation):
@@ -548,10 +563,13 @@ class RemoteTtsCog(Cog):
             ]
             worker_text = "\n".join(lines)
         else:
-            worker_text = "no worker session alive. jobs will queue until one is activated."
+            worker_text = (
+                "no worker session alive. jobs will queue until one is activated."
+            )
         voices = data.get("voices") or []
-        kag_lines = self._kaggle_lines(data.get("kaggle") or {},
-                                       bool(workers), data.get("queued") or 0)
+        kag_lines = self._kaggle_lines(
+            data.get("kaggle") or {}, bool(workers), data.get("queued") or 0
+        )
         jobs_block = await self._queue_block()
         await invocation.message.reply(
             f"```\nqueued: {data.get('queued')}\ninflight: {data.get('inflight')}"
@@ -641,11 +659,11 @@ class RemoteTtsCog(Cog):
         await invocation.message.reply(
             f"drained {killed} queued job(s){note}.", mention_author=False
         )
-    
+
     def _require_manager(self):
         if not MANAGER:
             raise CogError(
-                    "LEECH_TTS_URL isn't set. fix the bot, and point it at the manager.",
+                "LEECH_TTS_URL isn't set. fix the bot, and point it at the manager.",
                 is_user_error=False,
             )
 
@@ -655,8 +673,9 @@ class RemoteTtsCog(Cog):
             headers["x-leech-token"] = TOKEN
         return headers
 
-    async def _call(self, method: str, path: str,
-                    json_body: dict | None = None) -> httpx.Response:
+    async def _call(
+        self, method: str, path: str, json_body: dict | None = None
+    ) -> httpx.Response:
         timeout = httpx.Timeout(connect=15.0, read=60.0, write=180.0, pool=15.0)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -668,19 +687,25 @@ class RemoteTtsCog(Cog):
                     MANAGER + path, json=json_body, headers=self._headers()
                 )
         except httpx.HTTPError as e:
-            raise _ManagerError("offline", f"can't reach the manager ({e.__class__.__name__})")
+            raise _ManagerError(
+                "offline", f"can't reach the manager ({e.__class__.__name__})"
+            )
 
-    async def _call_json(self, method: str, path: str,
-                         json_body: dict | None = None) -> dict:
+    async def _call_json(
+        self, method: str, path: str, json_body: dict | None = None
+    ) -> dict:
         response = await self._call(method, path, json_body)
         if response.status_code == 401:
-            raise _ManagerError("auth", "token rejected. LEECH_TTS_TOKEN vs manager TOKEN")
+            raise _ManagerError(
+                "auth", "token rejected. LEECH_TTS_TOKEN vs manager TOKEN"
+            )
         if response.status_code >= 400:
             raise _ManagerError("server", f"manager said {response.status_code}")
         return response.json()
 
-    async def _push_voice(self, name: str, opus: bytes,
-                          seconds: float | None, text: str | None) -> bool:
+    async def _push_voice(
+        self, name: str, opus: bytes, seconds: float | None, text: str | None
+    ) -> bool:
         body = {
             "name": name,
             "data_b64": base64.b64encode(opus).decode("ascii"),
@@ -698,15 +723,17 @@ class RemoteTtsCog(Cog):
         try:
             response = await self._call("GET", f"/api/voices/{name}")
             if response.status_code == 200:
-                return 
+                return
         except _ManagerError:
-            return  
+            return
         wav_path = VOICES_DIR / entry["file"]
         if not wav_path.exists():
             return
         opus = await self._to_opus_async(wav_path.read_bytes())
         await self._push_voice(
-            name, opus, self._probe_seconds_bytes(wav_path.read_bytes()),
+            name,
+            opus,
+            self._probe_seconds_bytes(wav_path.read_bytes()),
             entry.get("text"),
         )
 
@@ -716,9 +743,11 @@ class RemoteTtsCog(Cog):
         state = str(wake.get("status"))
         reason = str(wake.get("reason") or "")
         if state == "pushed":
-            return (f" · waking kaggle "
-                    f"({'gpu' if wake.get('gpu') else 'cpu'}, "
-                    f"v{wake.get('version') or '?'})")
+            return (
+                f" · waking kaggle "
+                f"({'gpu' if wake.get('gpu') else 'cpu'}, "
+                f"v{wake.get('version') or '?'})"
+            )
         if state == "booting":
             return f" · kaggle: booting ({reason[:70]})"
         if state == "error":
@@ -727,8 +756,9 @@ class RemoteTtsCog(Cog):
             return f" · kaggle: {state} ({reason[:50]})"
         return f" · kaggle: {state}"
 
-    async def _run_job(self, invocation: Invocation, payload: dict,
-                       label: str, name: str):
+    async def _run_job(
+        self, invocation: Invocation, payload: dict, label: str, name: str
+    ):
         try:
             job = await self._call_json(
                 "POST", "/api/jobs", {"kind": "tts", "payload": payload}
@@ -740,7 +770,7 @@ class RemoteTtsCog(Cog):
         wake_note = self._wake_note(job.get("wake"))
         status = await invocation.message.reply(
             f"tts: queued (position {position}). {label}{wake_note}",
-            mention_author=False
+            mention_author=False,
         )
 
         # v9: the wait loop below was lost in the "kiggle wakes handle"
@@ -766,7 +796,7 @@ class RemoteTtsCog(Cog):
                         status,
                         "the worker finished but sent no audio back 😟 "
                         f"({result.get('engine') or '?'} · "
-                        f"{result.get('gen_seconds') or '?'}s)"
+                        f"{result.get('gen_seconds') or '?'}s)",
                     )
                     return
                 engine = str(result.get("engine") or "?")
@@ -782,20 +812,23 @@ class RemoteTtsCog(Cog):
             if state == "queued":
                 pos = view.get("position")
                 stage = f"queued (position {pos})" if pos else "queued"
-            if (stage and stage != shown
-                    and time.monotonic() - last_post >= MIN_UPDATE_SECS):
+            if (
+                stage
+                and stage != shown
+                and time.monotonic() - last_post >= MIN_UPDATE_SECS
+            ):
                 shown = stage
                 last_post = time.monotonic()
-                status = await self._update_status(
-                    status, f"tts: {stage}. {label}..."
-                )
+                status = await self._update_status(status, f"tts: {stage}. {label}...")
             if waited >= TIMEOUT:
                 no_worker = ""
                 try:
                     page = await self._call_json("GET", "/api/status")
                     if not page.get("workers"):
-                        no_worker = (" no worker session is alive - the next "
-                                     ">tts re-wakes kaggle on its own")
+                        no_worker = (
+                            " no worker session is alive - the next "
+                            ">tts re-wakes kaggle on its own"
+                        )
                 except _ManagerError:
                     pass
                 await self._update_status(
@@ -812,12 +845,14 @@ class RemoteTtsCog(Cog):
         if result.get("audio_b64"):
             try:
                 return base64.b64decode(str(result["audio_b64"])), ext
-            except Exception:  
+            except Exception:
                 return None, ext
         url = str(result.get("url") or "")
         if url.startswith("http"):
             try:
-                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=120.0, follow_redirects=True
+                ) as client:
                     response = await client.get(url)
                 response.raise_for_status()
                 if len(response.content) > UPLOAD_LIMIT:
@@ -826,7 +861,6 @@ class RemoteTtsCog(Cog):
             except httpx.HTTPError:
                 return None, ext
         return None, ext
-
 
     async def _resolve_sample(self, message: discord.Message) -> tuple[bytes, str]:
         found = await self._find_sample(message)
@@ -895,10 +929,22 @@ class RemoteTtsCog(Cog):
             return data
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", "pipe:0", "-ac", "1", "-ar", "24000",
-                "-t", str(TRIM_SECONDS),
-                "-f", "wav", "pipe:1",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                "pipe:0",
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                "-t",
+                str(TRIM_SECONDS),
+                "-f",
+                "wav",
+                "pipe:1",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -913,11 +959,26 @@ class RemoteTtsCog(Cog):
             return wav
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", "pipe:0", "-ac", "1", "-ar", "24000",
-                "-t", str(TRIM_SECONDS),
-                "-codec:a", "libopus", "-b:a", "32k",
-                "-f", "ogg", "pipe:1",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                "pipe:0",
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                "-t",
+                str(TRIM_SECONDS),
+                "-codec:a",
+                "libopus",
+                "-b:a",
+                "32k",
+                "-f",
+                "ogg",
+                "pipe:1",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -933,11 +994,18 @@ class RemoteTtsCog(Cog):
         try:
             info = sf.info(io.BytesIO(wav))
             return float(info.duration)
-        except Exception:  
+        except Exception:
             return None
 
-    async def _deliver(self, invocation: Invocation, status: discord.Message,
-                       data: bytes, ext: str, name: str, footer: str = ""):
+    async def _deliver(
+        self,
+        invocation: Invocation,
+        status: discord.Message,
+        data: bytes,
+        ext: str,
+        name: str,
+        footer: str = "",
+    ):
         if len(data) > UPLOAD_LIMIT:
             await self._update_status(
                 status,
@@ -955,8 +1023,9 @@ class RemoteTtsCog(Cog):
             mention_author=False,
         )
 
-    async def _update_status(self, status: discord.Message,
-                             text: str) -> discord.Message:
+    async def _update_status(
+        self, status: discord.Message, text: str
+    ) -> discord.Message:
         try:
             fresh = await status.channel.send(text)
         except discord.HTTPException:
@@ -977,7 +1046,6 @@ class RemoteTtsCog(Cog):
             _logger.warning("tts failed (status gone) 😟: %s", message)
         await self._delete_status(status)
 
-
     def _clone_entry(self, name: str) -> dict | None:
         entry = self.voices.get(name.strip().lower())
         if entry is None:
@@ -992,5 +1060,7 @@ class RemoteTtsCog(Cog):
             json.dumps({"version": 2, "voices": self.voices}, indent=2),
             encoding="utf-8",
         )
+
+
 def create_cog(context):
     return RemoteTtsCog(context)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" 
+"""
                     - leech release tooling -
 the version rule:
     canary  ->  X.Y.Z-beta   (the living branch, supervisor auto-deploys)
@@ -47,10 +47,13 @@ VERSION_LINE_RE = re.compile(r'^(version\s*=\s*")([^"]+)(")', re.MULTILINE)
 class ReleaseError(Exception):
     pass
 
+
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     proc = subprocess.run(
         ["git", "-C", str(root), *args],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if check and proc.returncode != 0:
         raise ReleaseError(
@@ -118,8 +121,10 @@ def write_version(root: Path, version: str) -> None:
 
 
 def _require_clean(root: Path) -> None:
-    if _git(root, "diff", "--quiet", check=False).returncode != 0 or \
-            _git(root, "diff", "--cached", "--quiet", check=False).returncode != 0:
+    if (
+        _git(root, "diff", "--quiet", check=False).returncode != 0
+        or _git(root, "diff", "--cached", "--quiet", check=False).returncode != 0
+    ):
         raise ReleaseError("working tree is dirty - commit or stash first")
 
 
@@ -132,14 +137,15 @@ def _ensure_identity(root: Path) -> None:
     'Author identity unknown'.  fill repo-local gaps with a bot ident -
     an identity that already resolves (local or global) is never
     touched."""
-    for key, value in (("user.name", "release-bot"),
-                       ("user.email", "release-bot@users.noreply.github.com")):
+    for key, value in (
+        ("user.name", "release-bot"),
+        ("user.email", "release-bot@users.noreply.github.com"),
+    ):
         proc = _git(root, "config", key, check=False)
         if proc.returncode != 0 or not proc.stdout.strip():
             _git(root, "config", key, value)
             _summary(
-                f"git {key} did not resolve - set {value!r} for the "
-                f"release commits"
+                f"git {key} did not resolve - set {value!r} for the " f"release commits"
             )
 
 
@@ -148,8 +154,9 @@ def _head(root: Path) -> str:
 
 
 def _tag_commit(root: Path, tag: str) -> str | None:
-    proc = _git(root, "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}",
-                check=False)
+    proc = _git(
+        root, "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}", check=False
+    )
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
@@ -167,7 +174,7 @@ def cmd_read(root: Path) -> int:
 
 def cmd_check_version(root: Path, target: str) -> int:
     version = read_version(root)
-    core, beta = parse_version(version) 
+    core, beta = parse_version(version)
     target = (target or "").strip().lower().removeprefix("origin/")
     if target == "master":
         if beta:
@@ -200,8 +207,9 @@ def cmd_promote(root: Path) -> int:
     _ensure_identity(root)
     head = _head(root)
 
-    master = _git(root, "rev-parse", "-q", "--verify", "origin/master",
-                  check=False).stdout.strip()
+    master = _git(
+        root, "rev-parse", "-q", "--verify", "origin/master", check=False
+    ).stdout.strip()
     if master and master == head:
         raise ReleaseError(
             "HEAD is origin/master - run promote from canary "
@@ -223,8 +231,12 @@ def cmd_promote(root: Path) -> int:
             f"(e.g. {next_beta(core)}) before promoting again."
         )
     branch = f"release/{tag}"
-    if _git(root, "rev-parse", "-q", "--verify", f"refs/heads/{branch}",
-            check=False).returncode == 0:
+    if (
+        _git(
+            root, "rev-parse", "-q", "--verify", f"refs/heads/{branch}", check=False
+        ).returncode
+        == 0
+    ):
         raise ReleaseError(
             f"branch {branch} already exists - delete the stale one "
             f"(git push origin --delete {branch}) and re-run."
@@ -245,8 +257,9 @@ def cmd_promote(root: Path) -> int:
     _git(root, "checkout", "-b", branch)
     write_version(root, core)
     _git(root, "add", "pyproject.toml")
-    _git(root, "commit", "-m", f"release: {tag} (strip -beta for master)",
-         "--no-verify")
+    _git(
+        root, "commit", "-m", f"release: {tag} (strip -beta for master)", "--no-verify"
+    )
 
     _output("version", core)
     _output("tag", tag)
@@ -289,10 +302,16 @@ def cmd_finalize(root: Path) -> int:
             _output("tag", tag)
             _output("next_version", next_beta(core))
             return 0
-        if _git(root, "merge-base", "--is-ancestor", existing, head,
-                check=False).returncode == 0:
-            print(f"{tag} tags an ancestor of HEAD - no version bump since, "
-                  f"nothing to release")
+        if (
+            _git(
+                root, "merge-base", "--is-ancestor", existing, head, check=False
+            ).returncode
+            == 0
+        ):
+            print(
+                f"{tag} tags an ancestor of HEAD - no version bump since, "
+                f"nothing to release"
+            )
             _output("tagged", "false")
             _output("version", core)
             _output("tag", tag)
@@ -330,14 +349,15 @@ def cmd_bump_canary(root: Path, to: str) -> int:
     _fetch(root)
     _ensure_identity(root)
 
-    master = _git(root, "rev-parse", "-q", "--verify", "origin/master",
-                  check=False).stdout.strip()
+    master = _git(
+        root, "rev-parse", "-q", "--verify", "origin/master", check=False
+    ).stdout.strip()
     if master:
-        contains = _git(root, "merge-base", "--is-ancestor", master, "HEAD",
-                        check=False)
+        contains = _git(
+            root, "merge-base", "--is-ancestor", master, "HEAD", check=False
+        )
         if contains.returncode != 0:
-            merge = _git(root, "merge", "--no-edit", "-X", "ours", master,
-                         check=False)
+            merge = _git(root, "merge", "--no-edit", "-X", "ours", master, check=False)
             if merge.returncode != 0:
                 _git(root, "merge", "--abort", check=False)
                 raise ReleaseError(
@@ -349,8 +369,7 @@ def cmd_bump_canary(root: Path, to: str) -> int:
     write_version(root, to)
     _git(root, "add", "pyproject.toml")
     if _git(root, "diff", "--cached", "--quiet", check=False).returncode != 0:
-        _git(root, "commit", "-m", f"canary: bump {to} (next cycle)",
-             "--no-verify")
+        _git(root, "commit", "-m", f"canary: bump {to} (next cycle)", "--no-verify")
 
     push = _git(root, "push", "origin", "HEAD:canary", check=False)
     if push.returncode != 0:
@@ -411,4 +430,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

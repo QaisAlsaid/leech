@@ -24,8 +24,9 @@ class ControlSidecar:
                 # not an error on our side - swallow the disconnects and
                 # keep serving.
                 exc = sys.exc_info()[1]
-                if isinstance(exc, (BrokenPipeError, ConnectionResetError,
-                                    ConnectionAbortedError)):
+                if isinstance(
+                    exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+                ):
                     return
                 super().handle_error(request, client_address)
 
@@ -43,8 +44,12 @@ class ControlSidecar:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
-                except (BrokenPipeError, ConnectionResetError,
-                        ConnectionAbortedError, socket.timeout):
+                except (
+                    BrokenPipeError,
+                    ConnectionResetError,
+                    ConnectionAbortedError,
+                    socket.timeout,
+                ):
                     # the caller stopped listening (curl --max-time,
                     # httpx read timeout). the mutation itself still ran
                     # on the supervisor side - losing the response is the
@@ -76,16 +81,24 @@ class ControlSidecar:
             def do_POST(self):
                 route = self.path.rstrip("/")
                 mutations = {
-                    "/switch", "/pull", "/revert",
-                    "/autopull", "/shutdown",
+                    "/switch",
+                    "/pull",
+                    "/revert",
+                    "/autopull",
+                    "/shutdown",
                 }
                 if route not in mutations:
                     self._send(404, {"ok": False, "error": "no such route"})
                     return
                 if not outer.token:
-                    self._send(503, {"ok": False,
-                                     "error": "SUPERVISOR_TOKEN is not set - "
-                                              "mutations are refused"})
+                    self._send(
+                        503,
+                        {
+                            "ok": False,
+                            "error": "SUPERVISOR_TOKEN is not set - "
+                            "mutations are refused",
+                        },
+                    )
                     return
                 if not self._authorized():
                     self._send(401, {"ok": False, "error": "bad token"})
@@ -93,7 +106,8 @@ class ControlSidecar:
                 body = self._body()
                 if route == "/switch":
                     result = outer.supervisor.request(
-                        "switch", channel=str(body.get("channel") or ""))
+                        "switch", channel=str(body.get("channel") or "")
+                    )
                 elif route == "/pull":
                     result = outer.supervisor.request(
                         "pull",
@@ -107,7 +121,8 @@ class ControlSidecar:
                     )
                 elif route == "/autopull":
                     result = outer.supervisor.request(
-                        "autopull", on=bool(body.get("on")))
+                        "autopull", on=bool(body.get("on"))
+                    )
                 else:
                     result = outer.supervisor.request("shutdown")
                 self._send(200, result)
@@ -117,10 +132,13 @@ class ControlSidecar:
 
     def start(self) -> None:
         server = self.server_class(("0.0.0.0", self.port), self.handler)
-        thread = threading.Thread(target=server.serve_forever,
-                                  name="control-sidecar", daemon=True)
+        thread = threading.Thread(
+            target=server.serve_forever, name="control-sidecar", daemon=True
+        )
         thread.start()
-        gating = "token-gated" if self.token else (
-            "disabled for mutations - set SUPERVISOR_TOKEN")
-        print(f"[control] listening on 0.0.0.0:{self.port} ({gating})",
-              flush=True)
+        gating = (
+            "token-gated"
+            if self.token
+            else ("disabled for mutations - set SUPERVISOR_TOKEN")
+        )
+        print(f"[control] listening on 0.0.0.0:{self.port} ({gating})", flush=True)

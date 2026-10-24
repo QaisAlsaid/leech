@@ -29,13 +29,8 @@ CONVERT_NAME = "convert"
 TRIM_NAME = "trim"
 ROOT_NAME = "ffmpeg"
 
-SERVER_URL = (
-    os.getenv("LEECH_HUB_URL") or ""
-).strip().rstrip("/")
-SERVER_TOKEN = (
-    os.getenv("LEECH_HUB_TOKEN")
-    or ""
-).strip()
+SERVER_URL = (os.getenv("LEECH_HUB_URL") or "").strip().rstrip("/")
+SERVER_TOKEN = (os.getenv("LEECH_HUB_TOKEN") or "").strip()
 
 AUDIO_FORMATS = ("mp3", "wav", "flac", "m4a", "opus", "copy")
 VIDEO_FORMATS = ("mp4", "mkv", "webm", "gif")
@@ -132,8 +127,11 @@ def _parse_args(text: str, *, trim: bool) -> _Args:
         times: list[str] = []
         rest: list[str] = []
         for token in positional:
-            if len(times) < 2 and not token.lower().startswith("http") \
-                    and _parse_time(token) is not None:
+            if (
+                len(times) < 2
+                and not token.lower().startswith("http")
+                and _parse_time(token) is not None
+            ):
                 times.append(token)
             else:
                 rest.append(token)
@@ -160,11 +158,13 @@ def _validate_opts(args: _Args) -> None:
     if args.res is not None and args.res not in RESOLUTIONS:
         raise CogError(
             f"res must be one of {', '.join(map(str, RESOLUTIONS))} — "
-            "like `res=720`.", is_user_error=True,
+            "like `res=720`.",
+            is_user_error=True,
         )
     if args.crf is not None and not (14 <= args.crf <= 34):
-        raise CogError("crf must be 14-34 (lower = better quality).",
-                       is_user_error=True)
+        raise CogError(
+            "crf must be 14-34 (lower = better quality).", is_user_error=True
+        )
     if args.fps is not None and not (1 <= args.fps <= 120):
         raise CogError("fps must be 1-120.", is_user_error=True)
     videoish = args.format in VIDEO_FORMATS
@@ -195,15 +195,16 @@ class _Server:
         try:
             if method == "GET":
                 resp = await self._http.get(
-                    SERVER_URL + path, headers={"x-leech-token": SERVER_TOKEN})
+                    SERVER_URL + path, headers={"x-leech-token": SERVER_TOKEN}
+                )
             else:
                 resp = await self._http.post(
-                    SERVER_URL + path, json=body,
-                    headers={"x-leech-token": SERVER_TOKEN})
+                    SERVER_URL + path,
+                    json=body,
+                    headers={"x-leech-token": SERVER_TOKEN},
+                )
         except httpx.HTTPError as exc:
-            raise ServerError(
-                f"leech-hub unreachable: {type(exc).__name__}"
-            ) from exc
+            raise ServerError(f"leech-hub unreachable: {type(exc).__name__}") from exc
         if resp.status_code == 401:
             raise ServerError(
                 "the leech-hub rejected the token "
@@ -217,11 +218,13 @@ class _Server:
                     detail = str(resp.json()["detail"])
                 except Exception:
                     detail = resp.text[:200]
-            raise ServerError(f"leech hub answered {resp.status_code}: {detail}")        
+            raise ServerError(f"leech hub answered {resp.status_code}: {detail}")
         try:
             data = resp.json()
         except json.JSONDecodeError as e:
-            raise ServerError(f"the leech-hub returned invalid json, details: {e}") from e
+            raise ServerError(
+                f"the leech-hub returned invalid json, details: {e}"
+            ) from e
         if not data.get("ok"):
             raise ServerError(str(data.get("error") or "unknown hub error"))
         return data
@@ -310,14 +313,16 @@ class FfmpegCog(Cog):
                         "res=/crf=/fps=/mute= (e.g. `>ffmpeg convert clip.mkv mp4 res=720`). "
                         "converting runs on the leech-hub, you get a cdn download link back."
                     ),
-                    arguments=[Argument(
-                        name="what",
-                        description="[url] [format] [kbps] [opts], e.g. 'mp3 320' or "
-                                    "'https://... clip.mkv webm res=720'.",
-                        usage_example="what=mp3 320",
-                        type=TypesRegistry.require(Types.STR),
-                        required=True,
-                    )],
+                    arguments=[
+                        Argument(
+                            name="what",
+                            description="[url] [format] [kbps] [opts], e.g. 'mp3 320' or "
+                            "'https://... clip.mkv webm res=720'.",
+                            usage_example="what=mp3 320",
+                            type=TypesRegistry.require(Types.STR),
+                            required=True,
+                        )
+                    ],
                     subcommands={},
                     binding=NativeBinding(handler=self.convert_handler),
                 ),
@@ -332,13 +337,15 @@ class FfmpegCog(Cog):
                         "format + opts) to reencode for exact cuts. source: "
                         "attachment, the message you reply to, or a url."
                     ),
-                    arguments=[Argument(
-                        name="what",
-                        description="<start> <end> [url] [format] [opts].",
-                        usage_example="what=1:30 2:05 mp3",
-                        type=TypesRegistry.require(Types.STR),
-                        required=True,
-                    )],
+                    arguments=[
+                        Argument(
+                            name="what",
+                            description="<start> <end> [url] [format] [opts].",
+                            usage_example="what=1:30 2:05 mp3",
+                            type=TypesRegistry.require(Types.STR),
+                            required=True,
+                        )
+                    ],
                     subcommands={},
                     binding=NativeBinding(handler=self.trim_handler),
                 ),
@@ -393,8 +400,9 @@ class FfmpegCog(Cog):
             text += f": {progress['note']}"
         return text[:REPLY_LIMIT]
 
-    async def _run_job(self, message: discord.Message, job_id: str, note: str,
-                       timeout: float) -> tuple[dict, discord.Message]:
+    async def _run_job(
+        self, message: discord.Message, job_id: str, note: str, timeout: float
+    ) -> tuple[dict, discord.Message]:
         status_msg = await self._reply(message, f"{note} - queued...")
         last_stage = ""
         last_edit = 0.0
@@ -405,7 +413,9 @@ class FfmpegCog(Cog):
             if state == "done":
                 return dict(job.get("result") or {}), status_msg
             if state == "error":
-                raise ServerError(str(job.get("error") or "the job failed on the runner."))
+                raise ServerError(
+                    str(job.get("error") or "the job failed on the runner.")
+                )
             stage = self._progress_text(note, job)
             now = time.monotonic()
             if stage != last_stage and now - last_edit >= PROGRESS_MIN_SECS:
@@ -456,7 +466,6 @@ class FfmpegCog(Cog):
             lines.append(f"[download]({url})")
         return "\n".join(lines)
 
-
     async def convert_handler(self, invocation: Invocation):
         args = _parse_args(invocation.arguments["what"], trim=False)
         if args.unknown:
@@ -484,7 +493,8 @@ class FfmpegCog(Cog):
         job_id = await self.server.submit_convert(args, url)
         timeout = JOB_TIMEOUT_VIDEO if video else JOB_TIMEOUT_AUDIO
         result, status_msg = await self._run_job(
-            invocation.message, job_id, f"converting to {label}", timeout)
+            invocation.message, job_id, f"converting to {label}", timeout
+        )
         await self._finish(status_msg, self._final(result))
 
     async def trim_handler(self, invocation: Invocation):
@@ -510,15 +520,14 @@ class FfmpegCog(Cog):
                 is_user_error=True,
             )
         fmt = args.format or "copy"
-        note = (
-            f"trimming {_fmt_pos(args.start)}-{_fmt_pos(args.end)}"
-            + ("" if fmt == "copy" else f" -> {fmt}")
+        note = f"trimming {_fmt_pos(args.start)}-{_fmt_pos(args.end)}" + (
+            "" if fmt == "copy" else f" -> {fmt}"
         )
         job_id = await self.server.submit_trim(args, url)
-        timeout = (JOB_TIMEOUT_VIDEO if fmt in VIDEO_FORMATS
-                   else JOB_TIMEOUT_AUDIO)
-        result, status_msg = await self._run_job(invocation.message, job_id, note,
-                                                 timeout)
+        timeout = JOB_TIMEOUT_VIDEO if fmt in VIDEO_FORMATS else JOB_TIMEOUT_AUDIO
+        result, status_msg = await self._run_job(
+            invocation.message, job_id, note, timeout
+        )
         await self._finish(status_msg, self._final(result))
 
 

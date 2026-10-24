@@ -487,9 +487,7 @@ class HelpCog(Cog):
 
                     text = "\n\n---\n\n".join(pages)
 
-        await paginator.paginate(
-            invocation.message, text, client=self.context.client
-        )
+        await paginator.paginate(invocation.message, text, client=self.context.client)
 
     async def concepts_handler(self, invocation: Invocation):
         raw = invocation.arguments.get("concept")
@@ -513,9 +511,7 @@ class HelpCog(Cog):
                 )
             text = f"**concept: {key}**\n\n{concept.body}"
 
-        await paginator.paginate(
-            invocation.message, text, client=self.context.client
-        )
+        await paginator.paginate(invocation.message, text, client=self.context.client)
 
 
 def create_cog(context: CogContext):

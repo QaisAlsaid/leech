@@ -32,14 +32,18 @@ TASK_PREVIEW = 25
 
 PRIORITY_EMOTE = {"high": "🔴", "medium": "🟠", "low": "🟡"}
 PRIORITY_ALIASES = {
-    "high": "high", "h": "high",
-    "medium": "medium", "med": "medium", "m": "medium",
-    "low": "low", "l": "low",
+    "high": "high",
+    "h": "high",
+    "medium": "medium",
+    "med": "medium",
+    "m": "medium",
+    "low": "low",
+    "l": "low",
 }
 PRIORITY_CLEAR = {"none", "no", "null", "clear", "-"}
 
 REMINDER_SCAN = 30.0
-REMINDER_PROMPT_TIMEOUT = 600.0 
+REMINDER_PROMPT_TIMEOUT = 600.0
 REMINDER_REPLY_RE = re.compile(
     r"""^\s*(?:
         (?:done|d|finish|complete|delete|del|remove)\b
@@ -207,7 +211,7 @@ class TodoCog(Cog):
             arguments=[],
             subcommands={},
             binding=NativeBinding(self.backup_handler),
-            elevated=True
+            elevated=True,
         )
         return {backup.name: backup}
 
@@ -388,7 +392,7 @@ class TodoCog(Cog):
             description="list all tasks list for the active list or a specific list.",
             usage_example=">todo list",
             arguments=[
-                    Argument(
+                Argument(
                     name="list",
                     description="the list name to list its tasks.",
                     usage_example="list=our work list",
@@ -665,9 +669,7 @@ class TodoCog(Cog):
                     mention_author=False,
                 )
                 return
-            lines = [
-                f"{i}: `{name}`" for i, name in enumerate(names, start=1)
-            ]
+            lines = [f"{i}: `{name}`" for i, name in enumerate(names, start=1)]
             await invocation.message.reply(
                 "backups (newest last - load with `>todo restore id=N`):\n"
                 + "\n".join(lines),
@@ -686,7 +688,6 @@ class TodoCog(Cog):
             "data are back to that moment.",
             mention_author=False,
         )
-
 
     def _parse_priority(self, value) -> str | None:
         raw = str(value or "").strip().strip('"').strip("'").strip().lower()
@@ -779,7 +780,11 @@ class TodoCog(Cog):
                     origin=origin,
                 )
             )
-        suffix = f" (priority {priority}, due {due_mod.render(due, tz=tz)})" if priority and due else ""
+        suffix = (
+            f" (priority {priority}, due {due_mod.render(due, tz=tz)})"
+            if priority and due
+            else ""
+        )
         await invocation.message.reply(
             f"added tasks: at indices: {indices[0]}...{indices[-1]}.{suffix}"
         )
@@ -796,7 +801,7 @@ class TodoCog(Cog):
         due_arg = invocation.arguments.get("due")
         if task_arg is None and priority_arg is None and due_arg is None:
             raise CogError(
-                    "nothing to update: give task, priority or due.",
+                "nothing to update: give task, priority or due.",
                 is_user_error=True,
             )
         tz = self._tz_of(invocation.message.author.id)
@@ -804,7 +809,11 @@ class TodoCog(Cog):
             invocation.message.author.id,
             index,
             task_arg if task_arg is not None else UNSET,
-            priority=self._parse_priority(priority_arg) if priority_arg is not None else UNSET,
+            priority=(
+                self._parse_priority(priority_arg)
+                if priority_arg is not None
+                else UNSET
+            ),
             due=self._parse_due(due_arg, tz=tz) if due_arg is not None else UNSET,
         )
         await invocation.message.reply(
@@ -822,9 +831,7 @@ class TodoCog(Cog):
         lines += self._render_task_lines(todolist, tz=tz)
         text = "\n".join(lines)
         invocation.chain.out.append(text)
-        await paginator.paginate(
-            invocation.message, text, client=self.context.client
-        )
+        await paginator.paginate(invocation.message, text, client=self.context.client)
 
     def get_tz(self) -> dict[str, Command]:
         tz = Command(
@@ -921,7 +928,7 @@ class TodoCog(Cog):
                     name="due",
                     description="when to ping you (30m, 15:00, tomorrow 9am, 10-24 ...).",
                     usage_example='due="tomorrow 9am"',
-                    help_content="multi-word times need quotes: due=\"tomorrow 9am\".",
+                    help_content='multi-word times need quotes: due="tomorrow 9am".',
                     type=TypesRegistry.require(Types.WORD),
                     required=True,
                 ),
@@ -1010,9 +1017,7 @@ class TodoCog(Cog):
                 'due="tomorrow 9am").',
                 is_user_error=True,
             )
-        index = self.todo.add_reminder(
-            user, task, due, self._origin_of(invocation)
-        )
+        index = self.todo.add_reminder(user, task, due, self._origin_of(invocation))
         await invocation.message.reply(
             f"reminder {index} set: '{task_preview(task)}' "
             f"{due_mod.render(due, tz=tz)} "
@@ -1034,9 +1039,7 @@ class TodoCog(Cog):
         lines += self._render_task_lines(todolist, tz=self._tz_of(user))
         text = "\n".join(lines)
         invocation.chain.out.append(text)
-        await paginator.paginate(
-            invocation.message, text, client=self.context.client
-        )
+        await paginator.paginate(invocation.message, text, client=self.context.client)
 
     async def list_editors_handler(self, invocation: Invocation):
         lst = invocation.arguments.get("list")
@@ -1051,9 +1054,7 @@ class TodoCog(Cog):
         if not todolist.editors:
             rawtext = "no editors."
         msg = f"**{name}**\n{rawtext}"
-        await paginator.paginate(
-            invocation.message, msg, client=self.context.client
-        )
+        await paginator.paginate(invocation.message, msg, client=self.context.client)
 
     async def set_editor_handler(self, invocation: Invocation):
         editor = invocation.arguments["user"]
@@ -1155,9 +1156,7 @@ class TodoCog(Cog):
             await asyncio.sleep(REMINDER_SCAN)
             try:
                 for spec in self.todo.due_ready():
-                    self.context.spawn(
-                        self._fire_reminder(spec), name="todo-due-ping"
-                    )
+                    self.context.spawn(self._fire_reminder(spec), name="todo-due-ping")
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1167,7 +1166,7 @@ class TodoCog(Cog):
         task = spec["task"]
         origin = task.origin
         if origin is None:
-            return 
+            return
         client = self.context.client
         preview = task_preview(task.content)
 
@@ -1194,7 +1193,7 @@ class TodoCog(Cog):
             except discord.HTTPException:
                 target = None
 
-        if target is None: 
+        if target is None:
             try:
                 user = client.get_user(origin.user_id)
                 if user is None:
@@ -1286,9 +1285,7 @@ class TodoCog(Cog):
 
         if word in DONE_WORDS:
             try:
-                removed = self.todo.finish_task(
-                    owner, list_name, task_id, actor=actor
-                )
+                removed = self.todo.finish_task(owner, list_name, task_id, actor=actor)
                 await _say(message, f"done - removed '{removed}'.")
             except BaseError as e:
                 await _say(message, f"couldn't remove it: {e.message}")
@@ -1296,9 +1293,7 @@ class TodoCog(Cog):
 
         try:
             when = due_mod.parse_snooze(text, tz=tz)
-            self.todo.reschedule_task(
-                owner, list_name, task_id, when, actor=actor
-            )
+            self.todo.reschedule_task(owner, list_name, task_id, when, actor=actor)
             await _say(
                 message,
                 f"pushed '{preview}' to {due_mod.render(when, tz=tz)} "

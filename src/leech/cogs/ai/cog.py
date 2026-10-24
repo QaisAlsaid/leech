@@ -60,10 +60,16 @@ from leech.core.helpers.interactions.model import media_kind
 
 URL_RE = re.compile(r"https?://[^\s)\"'<>\]]+")
 
-AI_URL = (os.getenv("LEECH_AI_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
+AI_URL = (
+    (os.getenv("LEECH_AI_URL") or os.getenv("LEECH_TTS_URL") or "").strip().rstrip("/")
+)
 AI_TOKEN = (os.getenv("LEECH_AI_TOKEN") or os.getenv("LEECH_TTS_TOKEN") or "").strip()
 AI_BACKEND = (os.getenv("LEECH_AI_BACKEND") or "").strip().lower()
-AI_KEYS = bool((os.getenv("GEMINI_API_KEY") or "").strip() or (os.getenv("GROQ_API_KEY") or "").strip())
+AI_KEYS = bool(
+    (os.getenv("GEMINI_API_KEY") or "").strip()
+    or (os.getenv("GROQ_API_KEY") or "").strip()
+)
+
 
 class AiCog(Cog):
     def note(self, channel_id: int, text: str) -> None:
@@ -87,7 +93,7 @@ class AiCog(Cog):
             turn_deadline=config.ai_turn_deadline,
             window_limit=config.ai_window_limit,
             window_budget=config.ai_window_budget,
-            backend="direct"
+            backend="direct",
         )
         self.context.add_on_unload(self.shutdown)
         self.log = ActionLog()
@@ -471,7 +477,6 @@ class AiCog(Cog):
             )
         }
 
-
     def get_off(self) -> dict[str, Command]:
         return {
             "off": Command(
@@ -585,7 +590,7 @@ class AiCog(Cog):
             resolved = ref.cached_message or getattr(ref, "resolved", None)
             if (
                 isinstance(resolved, discord.Message)
-                and resolved.author.id == client.user.id # pyright: ignore
+                and resolved.author.id == client.user.id  # pyright: ignore
             ):  # pyright: ignore
                 return True
         return False
@@ -600,7 +605,9 @@ class AiCog(Cog):
                 resolved = await message.channel.fetch_message(ref.message_id)
             except discord.HTTPException:
                 return None
-        if (not isinstance(resolved, discord.Message) or not resolved.content.strip()):  # pyright: ignore
+        if (
+            not isinstance(resolved, discord.Message) or not resolved.content.strip()
+        ):  # pyright: ignore
             return None
         snippet = " ".join(resolved.content.split())[:120]  # pyright: ignore
         return f"{resolved.author.display_name}: {snippet}"  # pyright: ignore
@@ -830,9 +837,11 @@ class AiCog(Cog):
                 # v10.9 AI_OPSEC_4: allow / deny / ask. anything not
                 # explicitly allowed (or denied) gets confirmed with the
                 # user right here, before anything runs.
-                if not dry and self._delegation_mode(
-                    requested.command, message.author.id
-                ) == "ask":
+                if (
+                    not dry
+                    and self._delegation_mode(requested.command, message.author.id)
+                    == "ask"
+                ):
                     verdict, remembered = await self._confirm_command(
                         message, requested.command
                     )
@@ -989,9 +998,7 @@ class AiCog(Cog):
 
     def _delegation_mode(self, path: str, user_id: int) -> str:
         """v10.9 AI_OPSEC_4: 'allow' | 'deny' | 'ask' for a command path."""
-        return self.context.client.security.delegation_mode(
-            user_id, f"command:{path}"
-        )
+        return self.context.client.security.delegation_mode(user_id, f"command:{path}")
 
     async def _confirm_command(
         self, message: discord.Message, command: str
@@ -1093,7 +1100,9 @@ class AiCog(Cog):
 
     async def say_handler(self, invocation: Invocation):
         if invocation.via == "ai":
-            raise CogError("the assistant tried to talk to itself 😁", is_user_error=True)
+            raise CogError(
+                "the assistant tried to talk to itself 😁", is_user_error=True
+            )
         self.ai.activate(invocation.message.channel.id)
         await self.request(invocation.message, invocation.arguments["message"])
         return None
@@ -1177,7 +1186,8 @@ class AiCog(Cog):
             await self.ai.remove_slot(invocation.arguments["model"].strip())
         except AiError as e:
             raise CogError(
-                f"i couldn't remove that model. details: {e.message}", is_user_error=True
+                f"i couldn't remove that model. details: {e.message}",
+                is_user_error=True,
             ) from e
         await invocation.message.reply(await self._chain_reply("removed. chain:"))
 
@@ -1187,7 +1197,8 @@ class AiCog(Cog):
             await self.ai.promote_slot(invocation.arguments["model"].strip())
         except AiError as e:
             raise CogError(
-                f"i couldn't promote that model. details: {e.message}", is_user_error=True
+                f"i couldn't promote that model. details: {e.message}",
+                is_user_error=True,
             ) from e
         await invocation.message.reply(await self._chain_reply("promoted. chain:"))
 
@@ -1239,19 +1250,14 @@ class AiCog(Cog):
     async def off_handler(self, invocation: Invocation):
         channel_id = invocation.message.channel.id
         self.ai.mute(channel_id)
-        await invocation.message.reply(
-            "ok, i will ghost you."
-        )
+        await invocation.message.reply("ok, i will ghost you.")
 
     async def on_handler(self, invocation: Invocation):
         channel_id = invocation.message.channel.id
         self.ai.unmute(channel_id)
         self.ai.activate(channel_id)
-        await invocation.message.reply(
-            "ok, back to normal."
-        )
+        await invocation.message.reply("ok, back to normal.")
 
 
 def create_cog(context: CogContext):
     return AiCog(context=context)
-

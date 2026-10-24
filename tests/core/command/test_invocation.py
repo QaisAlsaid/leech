@@ -1,6 +1,8 @@
 import pytest
 
-from leech.core.command.invocation import Invocation   # v10: Invocation lives here, not in runtime
+from leech.core.command.invocation import (
+    Invocation,
+)  # v10: Invocation lives here, not in runtime
 from leech.core.command.runtime import Command
 from leech.core.command.self.binding import SelfBinding
 from leech.core.command.native.binding import NativeBinding

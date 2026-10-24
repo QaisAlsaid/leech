@@ -316,12 +316,8 @@ class ChannelCog(Cog):
         force = bool(invocation.arguments.get("force"))
         commit = str(invocation.arguments.get("commit") or "").strip()
         target_hint = f" commit `{commit[:40]}`" if commit else ""
-        await self._reply(
-            invocation.message, f"pulling{target_hint}..."
-        )
-        result = await self._call(
-            "POST", "/pull", {"force": force, "commit": commit}
-        )
+        await self._reply(invocation.message, f"pulling{target_hint}...")
+        result = await self._call("POST", "/pull", {"force": force, "commit": commit})
         if result.get("up_to_date"):
             await self._reply(
                 invocation.message,
@@ -357,8 +353,11 @@ class ChannelCog(Cog):
             await self._reply(
                 invocation.message,
                 f"already on `{str(result.get('commit'))[:12]}`"
-                + (" (the commit you asked for)." if commit
-                   else " - it is the last good one."),
+                + (
+                    " (the commit you asked for)."
+                    if commit
+                    else " - it is the last good one."
+                ),
             )
             return
         if not result.get("ok"):
@@ -369,8 +368,11 @@ class ChannelCog(Cog):
         await self._reply(
             invocation.message,
             f"reverted to `{str(result.get('commit'))[:12]}` and rebooted."
-            + (" (explicit target - last_good unchanged unless the probe "
-               "passes.)" if commit else ""),
+            + (
+                " (explicit target - last_good unchanged unless the probe " "passes.)"
+                if commit
+                else ""
+            ),
         )
 
     async def autopoll_handler(self, invocation: Invocation):

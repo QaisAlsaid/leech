@@ -3,7 +3,6 @@ import pytest
 from leech.cogs.todo import due as due_mod
 from leech.cogs.todo.due import parse_due, render, format_due, parse_snooze
 
-
 NOW = 1_800_000_000.0
 
 

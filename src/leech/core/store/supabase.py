@@ -84,9 +84,7 @@ class SupabaseStore(Store):
             raise StoreError(f"failed to load namespace '{ns}': {e}") from e
         rows = response.json()
         with self._mirror_lock:
-            self._mirror[ns] = {
-                str(row["k"]): row["v"] for row in rows if "k" in row
-            }
+            self._mirror[ns] = {str(row["k"]): row["v"] for row in rows if "k" in row}
 
     def _ensure_loaded(self, ns: str) -> dict[str, Any]:
         with self._mirror_lock:
@@ -152,9 +150,7 @@ class SupabaseStore(Store):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._flusher = loop.create_task(
-            self._drain_forever(), name="store-flusher"
-        )
+        self._flusher = loop.create_task(self._drain_forever(), name="store-flusher")
 
     async def _drain_forever(self) -> None:
         while not self._closed:
@@ -223,18 +219,13 @@ class SupabaseStore(Store):
                 self._queue.sort(key=lambda op: op.seq)
             raise
 
-    async def _flush_async(
-        self, client: httpx.AsyncClient, ops: list[_Op]
-    ) -> None:
+    async def _flush_async(self, client: httpx.AsyncClient, ops: list[_Op]) -> None:
         for attempt in (1, 2):
             try:
                 puts = [op for op in ops if op.kind == "put"]
                 for start in range(0, len(puts), BATCH_ROWS):
                     chunk = puts[start : start + BATCH_ROWS]
-                    body = [
-                        {"ns": op.ns, "k": op.key, "v": op.value}
-                        for op in chunk
-                    ]
+                    body = [{"ns": op.ns, "k": op.key, "v": op.value} for op in chunk]
                     response = await client.post(
                         self._kv_url("?on_conflict=ns,k"),
                         headers=self._headers(write=True),

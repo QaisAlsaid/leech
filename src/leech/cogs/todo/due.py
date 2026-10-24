@@ -15,9 +15,23 @@ _CLOCK_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
 _SHORT_DATE_RE = re.compile(r"^(\d{1,2})-(\d{1,2})$")
 _WEEKDAYS = {
-    "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1, "wednesday": 2,
-    "wed": 2, "thursday": 3, "thu": 3, "thur": 3, "thurs": 3, "friday": 4,
-    "fri": 4, "saturday": 5, "sat": 5, "sunday": 6, "sun": 6,
+    "monday": 0,
+    "mon": 0,
+    "tuesday": 1,
+    "tue": 1,
+    "tues": 1,
+    "wednesday": 2,
+    "wed": 2,
+    "thursday": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "friday": 4,
+    "fri": 4,
+    "saturday": 5,
+    "sat": 5,
+    "sunday": 6,
+    "sun": 6,
 }
 _DAY_WORDS = {"today", "tonight", "tomorrow"}
 
@@ -82,7 +96,14 @@ def _strip(text: str) -> str:
     return (text or "").strip().strip('"').strip("'").strip()
 
 
-def _mk(hour: int, minute: int, *, base_day, advance_day: int = 0, tz: ZoneInfo | None = None) -> float:
+def _mk(
+    hour: int,
+    minute: int,
+    *,
+    base_day,
+    advance_day: int = 0,
+    tz: ZoneInfo | None = None,
+) -> float:
     import datetime as dt
 
     day = base_day + dt.timedelta(days=advance_day)
@@ -91,7 +112,12 @@ def _mk(hour: int, minute: int, *, base_day, advance_day: int = 0, tz: ZoneInfo 
 
 
 def _apply_clock(
-    base_day, text: str, *, default_hour=None, what: str, advance_day: int = 0,
+    base_day,
+    text: str,
+    *,
+    default_hour=None,
+    what: str,
+    advance_day: int = 0,
     tz: ZoneInfo | None = None,
 ):
     import datetime as dt
@@ -145,7 +171,9 @@ def _parse_relative(text: str, now: float) -> float:
     return now + total
 
 
-def _parse_weekday(word: str, rest: str, now: float, tz: ZoneInfo | None = None) -> float:
+def _parse_weekday(
+    word: str, rest: str, now: float, tz: ZoneInfo | None = None
+) -> float:
     import datetime as dt
 
     target = _WEEKDAYS[word]
@@ -154,7 +182,7 @@ def _parse_weekday(word: str, rest: str, now: float, tz: ZoneInfo | None = None)
     stamp = _apply_clock(
         today + dt.timedelta(days=delta), rest, default_hour=9, what=word, tz=tz
     )
-    if stamp <= now: 
+    if stamp <= now:
         stamp += 7 * 86400
     return stamp
 
@@ -175,9 +203,12 @@ def _parse_date(text: str, rest: str, now: float, tz: ZoneInfo | None = None) ->
             base = dt.date(today.year, month, day)
         except ValueError:
             raise DueError(f"'{text}' is not a real date.")
-        if dt.datetime.combine(
-            base, dt.time(23, 59), tzinfo=resolve_tz(tz)
-        ).timestamp() <= now:
+        if (
+            dt.datetime.combine(
+                base, dt.time(23, 59), tzinfo=resolve_tz(tz)
+            ).timestamp()
+            <= now
+        ):
             base = dt.date(today.year + 1, month, day)
     stamp = _apply_clock(base, rest, default_hour=9, what="that date", tz=tz)
     return stamp
@@ -225,7 +256,9 @@ def parse_due(
     if head in _WEEKDAYS:
         return Due(*_with_human(_parse_weekday(head, rest, now, tz), tz))
 
-    if _REL_PIECE.match(_REL_RE.sub("", lowered).replace(" ", "")) or lowered.startswith("in "):
+    if _REL_PIECE.match(
+        _REL_RE.sub("", lowered).replace(" ", "")
+    ) or lowered.startswith("in "):
         epoch = _parse_relative(lowered, now)
         return Due(epoch, render(epoch, tz=tz))
 

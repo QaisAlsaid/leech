@@ -3,8 +3,7 @@ from leech.core.error import BaseError
 from leech.core.store import Store, get_store
 import time
 
-
-UNSET = object() 
+UNSET = object()
 
 PRIORITIES = ("high", "medium", "low")
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2, None: 3}
@@ -38,10 +37,10 @@ class TaskOrigin(BaseModel):
 class TodoTask(BaseModel):
     content: str
     author_id: int | None = None
-    id: int | None = None          # creation order identity (ms stamp)
-    priority: str | None = None    # high | medium | low | None
-    due: float | None = None       # unix seconds
-    reminded: bool = False         # ping fired (and was answered or given up)
+    id: int | None = None  # creation order identity (ms stamp)
+    priority: str | None = None  # high | medium | low | None
+    due: float | None = None  # unix seconds
+    reminded: bool = False  # ping fired (and was answered or given up)
     origin: TaskOrigin | None = None
 
     @field_validator("priority", mode="before")
@@ -123,6 +122,7 @@ def reconcile_order(container: TodoContainer) -> None:
     container.list_order = order
     container.todo = {name: container.todo[name] for name in order}
 
+
 UNDO_KEEP = 30
 BACKUP_EVERY = 25
 BACKUP_KEEP = 12
@@ -143,13 +143,13 @@ class TodoService:
         self.store = store or get_store()
         self.containers: dict[int, TodoContainer] = {
             int(key): (
-                value if isinstance(value, TodoContainer)
+                value
+                if isinstance(value, TodoContainer)
                 else TodoContainer.model_validate(value)
             )
             for key, value in self.store.items(NS_TODO).items()
         }
         self._mutations = 0
-
 
     def _snapshot(self, actor: int, action: str, *owners: int) -> None:
         for owner in dict.fromkeys(o for o in owners if o):
@@ -159,7 +159,8 @@ class TodoService:
                 "action": action,
                 "state": (
                     self.containers[owner].model_dump(mode="json")
-                    if owner in self.containers else None
+                    if owner in self.containers
+                    else None
                 ),
             }
             seq = int(time.time() * 1000)
@@ -176,13 +177,12 @@ class TodoService:
             try:
                 self.backup()
             except TodoError:
-                pass  
+                pass
 
     def _undo_entries(self, user: int) -> list[str]:
         prefix = f"{user}/"
         return sorted(
-            key for key in self.store.items(NS_UNDO)
-            if key.startswith(prefix)
+            key for key in self.store.items(NS_UNDO) if key.startswith(prefix)
         )
 
     def undo(self, user: int) -> dict | None:
@@ -207,13 +207,15 @@ class TodoService:
 
     def log(self, user: int, limit: int = 10) -> list[dict]:
         out: list[dict] = []
-        for key in reversed(self._undo_entries(user)[-max(1, limit):]):
+        for key in reversed(self._undo_entries(user)[-max(1, limit) :]):
             entry = self.store.get(NS_UNDO, key) or {}
-            out.append({
-                "action": entry.get("action") or "?",
-                "actor": entry.get("actor"),
-                "at": entry.get("at"),
-            })
+            out.append(
+                {
+                    "action": entry.get("action") or "?",
+                    "actor": entry.get("actor"),
+                    "at": entry.get("at"),
+                }
+            )
         return out
 
     def backup(self) -> str:
@@ -223,11 +225,7 @@ class TodoService:
         self.store.put(
             NS_BACKUP,
             name,
-            {
-                "containers": container_adapter.dump_python(
-                    self.containers, mode="json"
-                )
-            },
+            {"containers": container_adapter.dump_python(self.containers, mode="json")},
         )
         for stale in sorted(self.store.items(NS_BACKUP))[:-BACKUP_KEEP]:
             self.store.delete(NS_BACKUP, stale)
@@ -259,7 +257,6 @@ class TodoService:
         for owner in containers:
             self._persist(owner)
         return len(containers)
-
 
     def _persist(self, owner: int) -> None:
         try:
@@ -468,9 +465,7 @@ class TodoService:
                 raise TodoError("you are not authorized to edit this list.")
         due = _check_due(due)
         self._snapshot(actor, "reschedule", owner)
-        lst.todo[index] = task.model_copy(
-            update={"due": due, "reminded": False}
-        )
+        lst.todo[index] = task.model_copy(update={"due": due, "reminded": False})
         self._persist(owner)
         return task_preview_of(task)
 
@@ -509,7 +504,6 @@ class TodoService:
                         }
                     )
         return fired
-
 
     @staticmethod
     def sorted_tasks(lst: TodoList) -> list[tuple[int, TodoTask]]:

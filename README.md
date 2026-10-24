@@ -12,6 +12,7 @@
 
 <p align="center">
   <img src="assets/logo.png" width="150" alt="Leech Logo (Frieren eating Leech)">
+
 </p>
 
 A Discord bot written in Python. It used to be a parasite, it still is, but also implemented its own cool features.
@@ -45,7 +46,7 @@ It started as a leech: *riding* other bots, running their commands, pressing the
 
 **deployment (self-hosting)**
 
-- `>channel status / pull / revert` - the bot manages its own deploy: canary auto-deploy, probe-gated restarts, revert to last known good, pull a specific commit
+- `>channel status / pull / revert` - the bot manages its own deploy: canary, auto-deploy, probe-gated restarts, revert to last known good, pull a specific commit
 - a supervisor sidecar (`deploy/supervisor.py`) watches the bot, pins versions, detects when it itself is stale, and surfaces the running semver (read from `pyproject.toml` when the clone has no tags)
 
 

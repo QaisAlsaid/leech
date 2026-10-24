@@ -27,6 +27,7 @@ from its in-memory mirror on the next edit), then start the bot:
     python scripts/fix_list_order.py --dry-run
     python scripts/fix_list_order.py
 """
+
 from __future__ import annotations
 
 import argparse
@@ -81,15 +82,20 @@ def main() -> int:
         description="repair todo list order in the live store (v10.9)."
     )
     parser.add_argument(
-        "--backend", choices=("json", "supabase"), default=None,
+        "--backend",
+        choices=("json", "supabase"),
+        default=None,
         help="live store backend (default: LEECH_STORE env, else json).",
     )
     parser.add_argument(
-        "--from", dest="source", default="persistent/v1",
+        "--from",
+        dest="source",
+        default="persistent/v1",
         help="the untouched v1 tree (default: persistent/v1)",
     )
     parser.add_argument(
-        "--v2-from", default=None,
+        "--v2-from",
+        default=None,
         help="where the v10.7 json store lives (default: LEECH_STORE_DIR "
         "env, else persistent/v2)",
     )
@@ -125,8 +131,10 @@ def main() -> int:
         print("the live 'todo' namespace is empty - nothing to repair.")
         return 0
 
-    print(f"repairing list order on the {backend} store "
-          f"({len(live)} user row(s)), source order from:")
+    print(
+        f"repairing list order on the {backend} store "
+        f"({len(live)} user row(s)), source order from:"
+    )
     print(f"  v1: {v1}{' (missing)' if not v1.is_dir() else ''}")
     print(f"  v2: {v2}{' (missing)' if not v2.is_dir() else ''}")
 
@@ -160,8 +168,10 @@ def main() -> int:
         changed += 1
 
     if args.dry_run:
-        print(f"dry run - nothing written ({changed} row(s) would change, "
-              f"{untouched} already fine).")
+        print(
+            f"dry run - nothing written ({changed} row(s) would change, "
+            f"{untouched} already fine)."
+        )
         return 0
 
     print(f"done: {changed} row(s) repaired, {untouched} already fine.")
