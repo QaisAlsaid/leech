@@ -3,7 +3,7 @@
 <p align="center">
 
 [![CI](https://img.shields.io/github/actions/workflow/status/QaisAlsaid/leech/ci.yml?branch=master&style=for-the-badge&logo=github&label=CI)](https://github.com/QaisAlsaid/leech/actions)
-[![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Release](https://img.shields.io/github/v/release/QaisAlsaid/leech?style=for-the-badge&logo=github&label=release)](https://github.com/QaisAlsaid/leech/releases)
 [![License](https://img.shields.io/github/license/QaisAlsaid/leech?style=for-the-badge)](https://github.com/QaisAlsaid/leech/blob/master/LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/2y6r8MuaHy)
@@ -92,7 +92,7 @@ at the root: `pyproject.toml`, `example.env` (every env var the bot actually rea
 
 ## Running
 
-You need git and python 3.14+.
+You need git and python 3.13+.
 
 ```bash
 git clone https://codeberg.org/qais/leech.git
