@@ -338,6 +338,33 @@ class TodoCog(Cog):
         )
         return {remove.name: remove}
 
+    def get_remove_all(self) -> dict[str, Command]:
+        remove_all = Command(
+            name="removes",
+            description="remove tasks in a range [start:end] from the current active list.",
+            usage_example="todo remove index=2",
+            help_content="by removing a task you remove it permenantly from the todo list.",
+            arguments=[
+                Argument(
+                    name="start",
+                    description="the start of the range (inclusive).",
+                    usage_example="start=2",
+                    type=TypesRegistry.require(Types.INT),
+                    required=True,
+                ),
+                Argument(
+                    name="end",
+                    description="the end of the range (inclusive).",
+                    usage_example="end=5",
+                    type=TypesRegistry.require(Types.INT),
+                    required=True,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.remove_all_handler),
+        )
+        return {remove_all.name: remove_all}
+
     def get_update(self) -> dict[str, Command]:
         update = Command(
             name="update",
@@ -794,6 +821,12 @@ class TodoCog(Cog):
         task = self.todo.remove_task(invocation.message.author.id, index)
         await invocation.message.reply(f"removed task at: {index}.")
 
+    async def remove_all_handler(self, invocation: Invocation):
+        start = invocation.arguments["start"]
+        end = invocation.arguments["end"]
+        task = self.todo.remove_tasks(invocation.message.author.id, start, end)
+        await invocation.message.reply(f"removed tasks {f'at {start}' if start == end else f'from {start}:{end}'}.")
+
     async def update_handler(self, invocation: Invocation):
         index = invocation.arguments["index"]
         task_arg = invocation.arguments.get("task")
@@ -1115,7 +1148,7 @@ class TodoCog(Cog):
         rawtext = "\n".join(rows)
         footer = f"\n> total: {total} tasks"
         if excluded_tasks:
-            footer += f" (+{excluded_tasks} in excluded lists)."
+            footer += f" (+{excluded_tasks} in excluded lists). (sum {excluded_tasks + total})."
         else:
             footer += "."
         rawtext += footer

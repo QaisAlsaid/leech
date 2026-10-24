@@ -403,6 +403,16 @@ class TodoService:
         self._persist(user_container.active.author_id)
         return task.content
 
+    def remove_tasks(self, user: int, start_task_index: int, end_task_index: int):
+        user_container = self.ensure_container(user)
+        active = self.ensure_active_list(Perms(remove=True), user_container)
+        if start_task_index < 0 or end_task_index >= len(active.todo) or not active.todo:
+            raise TodoError("invalid range for list.")
+        for i in range(start_task_index, end_task_index):
+            self._snapshot(user, "remove", user_container.active.author_id)
+            task = active.todo.pop(i)
+            self._persist(user_container.active.author_id)
+
     def update_task(
         self,
         user: int,
