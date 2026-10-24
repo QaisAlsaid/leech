@@ -825,7 +825,7 @@ class TodoCog(Cog):
     async def remove_all_handler(self, invocation: Invocation):
         start = invocation.arguments["start"]
         end = invocation.arguments["end"]
-        task = self.todo.remove_tasks(invocation.message.author.id, start, end)
+        self.todo.remove_tasks(invocation.message.author.id, start, end)
         await invocation.message.reply(f"removed tasks {f'at {start}' if start == end else f'from {start}:{end}'}.")
 
     async def update_handler(self, invocation: Invocation):
