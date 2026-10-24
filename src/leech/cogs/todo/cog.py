@@ -137,6 +137,7 @@ class TodoCog(Cog):
             **self.get_add(),
             **self.get_add_all(),
             **self.get_remove(),
+            **self.get_remove_all(),
             **self.get_update(),
             **self.get_list(),
             **self.get_create(),
