@@ -145,7 +145,7 @@ A few things **deliberately** stay local: tts voice clone files (and their catal
 
 early-ish development:
 
-**canary** branch sits around `v0.8.x`. It moves, and occasionally breaks. 
+**canary** branch sits around `v0.9.x`. It moves, and occasionally breaks. 
 
 **master** branch falls a bit behind canary but is generally a bit more stable. 
 
