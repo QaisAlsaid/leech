@@ -21,6 +21,7 @@ from .service import (
     TodoService,
     UNDO_KEEP,
     UNSET,
+    task_label,
 )
 from . import due as due_mod
 
@@ -63,8 +64,19 @@ DONE_WORDS = {"done", "d", "finish", "complete", "delete", "del", "remove"}
 IGNORE_WORDS = {"ignore", "skip", "stop", "cancel", "keep", "dismiss"}
 SNOOZE_WORDS = {"snooze", "later"}
 
+
 def task_preview(task: str) -> str:
     return f"{task if len(task) < TASK_PREVIEW else f'{task[:TASK_PREVIEW - 3]}...'}"
+
+
+def _ago(epoch: float, *, now: float | None = None) -> str:
+    """v12: how long ago a stamp is ('2h ago'), or 'in 2h' if it is
+    somehow in the future."""
+    now = time.time() if now is None else now
+    delta = now - epoch
+    if delta < 0:
+        return f"in {due_mod.humanize(-delta)}"
+    return f"{due_mod.humanize(delta)} ago"
 
 
 def format_perms(perms: Perms):
@@ -129,6 +141,28 @@ class TodoCog(Cog):
         )
         if not self.context.add_command(remind.name, remind):
             raise CogError(f"failed to load '{remind.name}' command.")
+
+        tree = Command(
+            name="tree",
+            description="tree todos - one task that grows branches (46a, 46b, 46c...).",
+            usage_example=">tree start oklang rewrite",
+            help_content=(
+                "a tree is a task with a number (say 46). while it is "
+                "started, every task you add becomes a branch of it - "
+                "46a, 46b, 46c... - instead of a fresh number. "
+                "`>tree stop` ends it: the next task is 47. resume any "
+                "tree later (even after other tasks) with "
+                "`>tree start <its number or name>`. branches are "
+                "normal tasks: priorities, dues, `>todo update/remove "
+                "index=46b`, everything works on them."
+            ),
+            arguments=[],
+            subcommands=self.get_tree_subcommands(),
+            binding=MockBinding(),
+            is_root=True,
+        )
+        if not self.context.add_command(tree.name, tree):
+            raise CogError(f"failed to load '{tree.name}' command.")
         self.context.spawn(self._due_loop(), name="todo-due-loop")
 
     def get_subcommands(self) -> dict[str, Command]:
@@ -138,6 +172,7 @@ class TodoCog(Cog):
             **self.get_remove(),
             **self.get_remove_all(),
             **self.get_update(),
+            **self.get_info(),
             **self.get_list(),
             **self.get_create(),
             **self.get_discard(),
@@ -326,10 +361,10 @@ class TodoCog(Cog):
             arguments=[
                 Argument(
                     name="index",
-                    description="the task index you wish to remove.",
+                    description="the task number you wish to remove (like 12, or a tree branch like 46b).",
                     usage_example="index=2",
-                    help_content="the task index in the target list, it gets shown when first adding the task, or can be retrived via ``>todo list`` when the list is active.",
-                    type=TypesRegistry.require(Types.INT),
+                    help_content="the task's number - shown in `>todo list` and when adding it. numbers are stable: they don't shift when other tasks are removed. tree branches are addressed like 46b.",
+                    type=TypesRegistry.require(Types.WORD),
                     required=True,
                 )
             ],
@@ -341,9 +376,9 @@ class TodoCog(Cog):
     def get_remove_all(self) -> dict[str, Command]:
         remove_all = Command(
             name="removes",
-            description="remove tasks in a range [start:end] from the current active list.",
-            usage_example="todo remove index=2",
-            help_content="by removing a task you remove it permenantly from the todo list.",
+            description="remove tasks in a range of numbers [start:end] from the current active list.",
+            usage_example=">todo removes start=2 end=5",
+            help_content="by removing tasks you remove them permenantly from the todo list. the range is task numbers (inclusive) - tree branches ride their root's number, so a range covering a tree takes its whole subtree.",
             arguments=[
                 Argument(
                     name="start",
@@ -358,7 +393,7 @@ class TodoCog(Cog):
                     usage_example="end=5",
                     type=TypesRegistry.require(Types.INT),
                     required=True,
-                )
+                ),
             ],
             subcommands={},
             binding=NativeBinding(self.remove_all_handler),
@@ -379,10 +414,10 @@ class TodoCog(Cog):
             arguments=[
                 Argument(
                     name="index",
-                    description="the task index you wish to update.",
+                    description="the task number you wish to update (like 12, or a tree branch like 46b).",
                     usage_example="index=2",
-                    help_content="the task index in the target list, it gets shown when first adding the task, or can be retrived via ``>todo list`` when the list is active.",
-                    type=TypesRegistry.require(Types.INT),
+                    help_content="the task's number - shown in `>todo list` and when adding it. numbers are stable: they don't shift when other tasks are removed.",
+                    type=TypesRegistry.require(Types.WORD),
                     required=True,
                 ),
                 Argument(
@@ -412,6 +447,49 @@ class TodoCog(Cog):
             binding=NativeBinding(self.update_handler),
         )
         return {update.name: update}
+
+    def get_info(self) -> dict[str, Command]:
+        info = Command(
+            name="info",
+            description="everything known about one task - priority, due, created/edited stamps, tree.",
+            usage_example=">todo info index=46b",
+            help_content=(
+                "task numbers are stable, so 12 stays 12. tree branches "
+                "are addressed like 46b. creation and edit times are "
+                "shown in your `>todo tz` timezone; tasks from before "
+                "this feature know their creation from their birth "
+                "stamp, older ones say unknown."
+            ),
+            arguments=[
+                Argument(
+                    name="index",
+                    description="the task number (like 12, or a tree branch like 46b).",
+                    usage_example="index=46b",
+                    help_content="the task's number - shown in `>todo list`.",
+                    type=TypesRegistry.require(Types.WORD),
+                    required=True,
+                ),
+                Argument(
+                    name="list",
+                    description="the list name to look in.",
+                    usage_example="list=my work list",
+                    help_content="defaults to the current active list if left blank.",
+                    type=TypesRegistry.require(Types.STR),
+                    required=False,
+                ),
+                Argument(
+                    name="author",
+                    description="the author of the list.",
+                    usage_example="author=@opposingfork",
+                    help_content="defaults to you if left blank.",
+                    type=TypesRegistry.require(Types.USER),
+                    required=False,
+                ),
+            ],
+            subcommands={},
+            binding=NativeBinding(self.info_handler),
+        )
+        return {info.name: info}
 
     def get_list(self) -> dict[str, Command]:
         ls = Command(
@@ -742,7 +820,11 @@ class TodoCog(Cog):
 
     def _render_task_lines(self, todolist, *, tz=None) -> list[str]:
         lines = []
-        for i, task in self.todo.sorted_tasks(todolist):
+        for _pos, task in self.todo.sorted_tasks(todolist):
+            # v12: tasks show their stable number (or tree label 46b)
+            # instead of a shifting position. tree roots wear 🌳.
+            label = task_label(task)
+            tree_mark = "🌳 " if task.tree else ""
             emote = PRIORITY_EMOTE.get(task.priority or "")
             lead = f"{emote} " if emote else ""
             tail = []
@@ -753,7 +835,7 @@ class TodoCog(Cog):
                 if task.reminded:
                     tail.append("🔔 pinged")
             suffix = f" {' · '.join(tail)}" if tail else ""
-            lines.append(f"{lead}{i}: {task.content}{suffix}")
+            lines.append(f"{tree_mark}{lead}{label}: {task.content}{suffix}")
         return lines
 
     def _origin_of(self, invocation: Invocation) -> TaskOrigin:
@@ -771,7 +853,7 @@ class TodoCog(Cog):
         priority = self._parse_priority(invocation.arguments.get("priority"))
         due = self._parse_due(invocation.arguments.get("due"), tz=tz)
         origin = self._origin_of(invocation) if due is not None else None
-        index = self.todo.add_task(
+        label = self.todo.add_task(
             user,
             task,
             priority=priority,
@@ -779,6 +861,8 @@ class TodoCog(Cog):
             origin=origin,
         )
         notes = []
+        if not label.isdigit():
+            notes.append(f"tree {re.sub(r'[a-z]+$', '', label)}")
         if priority:
             notes.append(f"priority {PRIORITY_EMOTE[priority]} {priority}")
         if due is not None:
@@ -786,7 +870,7 @@ class TodoCog(Cog):
                 f"due {due_mod.render(due, tz=tz)} (in {due_mod.humanize(due - time.time())})"
             )
         suffix = f" ({', '.join(notes)})" if notes else ""
-        await invocation.message.reply(f"added task: at index: {index}.{suffix}")
+        await invocation.message.reply(f"added task {label}{suffix}.")
 
     async def adds_handler(self, invocation: Invocation):
         tasks_raw = str(invocation.arguments["tasks"])
@@ -796,9 +880,9 @@ class TodoCog(Cog):
         priority = self._parse_priority(invocation.arguments.get("priority"))
         due = self._parse_due(invocation.arguments.get("due"), tz=tz)
         origin = self._origin_of(invocation) if due is not None else None
-        indices = []
+        labels = []
         for task in tasks:
-            indices.append(
+            labels.append(
                 self.todo.add_task(
                     user,
                     task,
@@ -813,22 +897,23 @@ class TodoCog(Cog):
             else ""
         )
         await invocation.message.reply(
-            f"added tasks: at indices: {indices[0]}...{indices[-1]}.{suffix}"
+            f"added tasks: {labels[0]}...{labels[-1]}{suffix}."
         )
 
     async def remove_handler(self, invocation: Invocation):
-        index = invocation.arguments["index"]
-        task = self.todo.remove_task(invocation.message.author.id, index)
-        await invocation.message.reply(f"removed task at: {index}.")
+        label, _content = self.todo.remove_task(
+            invocation.message.author.id, invocation.arguments["index"]
+        )
+        await invocation.message.reply(f"removed task {label}.")
 
     async def remove_all_handler(self, invocation: Invocation):
         start = invocation.arguments["start"]
         end = invocation.arguments["end"]
-        self.todo.remove_tasks(invocation.message.author.id, start, end)
-        await invocation.message.reply(f"removed tasks {f'at {start}' if start == end else f'from {start}:{end}'}.")
+        count = self.todo.remove_tasks(invocation.message.author.id, start, end)
+        span = f"{start}" if start == end else f"{start}..{end}"
+        await invocation.message.reply(f"removed {count} task(s) numbered {span}.")
 
     async def update_handler(self, invocation: Invocation):
-        index = invocation.arguments["index"]
         task_arg = invocation.arguments.get("task")
         priority_arg = invocation.arguments.get("priority")
         due_arg = invocation.arguments.get("due")
@@ -838,9 +923,9 @@ class TodoCog(Cog):
                 is_user_error=True,
             )
         tz = self._tz_of(invocation.message.author.id)
-        old = self.todo.update_task(
+        label, old = self.todo.update_task(
             invocation.message.author.id,
-            index,
+            invocation.arguments["index"],
             task_arg if task_arg is not None else UNSET,
             priority=(
                 self._parse_priority(priority_arg)
@@ -850,7 +935,7 @@ class TodoCog(Cog):
             due=self._parse_due(due_arg, tz=tz) if due_arg is not None else UNSET,
         )
         await invocation.message.reply(
-            f"updated task at: {index} from: '{task_preview(old)}'."
+            f"updated task {label} from: '{task_preview(old)}'."
         )
 
     async def list_handler(self, invocation: Invocation):
@@ -979,6 +1064,139 @@ class TodoCog(Cog):
         )
         return {add.name: add, ls.name: ls}
 
+    def get_tree_subcommands(self) -> dict[str, Command]:
+        start = Command(
+            name="start",
+            description="start a tree (or resume an existing one by number or name).",
+            usage_example=">tree start oklang rewrite",
+            help_content=(
+                "starts a new tree whose root task is named after your "
+                "argument. if the argument matches an existing tree's "
+                "number (like 46) or name, that tree resumes instead - "
+                "new tasks grow on it again. trees live on the active "
+                "list."
+            ),
+            arguments=[
+                Argument(
+                    name="name",
+                    description="the tree's name - or an existing tree's number or name to resume.",
+                    usage_example="name=oklang rewrite",
+                    type=TypesRegistry.require(Types.STR),
+                    required=True,
+                )
+            ],
+            subcommands={},
+            binding=NativeBinding(self.tree_start_handler),
+        )
+        stop = Command(
+            name="stop",
+            description="stop the active tree - the next task gets its own number.",
+            usage_example=">tree stop",
+            arguments=[],
+            subcommands={},
+            binding=NativeBinding(self.tree_stop_handler),
+        )
+        ls = Command(
+            name="list",
+            description="show the trees on the active list.",
+            usage_example=">tree list",
+            arguments=[],
+            subcommands={},
+            binding=NativeBinding(self.tree_list_handler),
+        )
+        return {start.name: start, stop.name: stop, ls.name: ls}
+
+    async def tree_start_handler(self, invocation: Invocation):
+        label, resumed, content = self.todo.start_tree(
+            invocation.message.author.id, invocation.arguments["name"]
+        )
+        if resumed:
+            await invocation.message.reply(
+                f"tree {label} '{task_preview(content)}' resumed - new "
+                "tasks grow on it again.",
+                mention_author=False,
+            )
+            return
+        await invocation.message.reply(
+            f"tree {label} '{task_preview(content)}' started - tasks you "
+            f"add now grow as {label}a, {label}b, {label}c... "
+            "(`>tree stop` to stop).",
+            mention_author=False,
+        )
+
+    async def tree_stop_handler(self, invocation: Invocation):
+        label = self.todo.stop_tree(invocation.message.author.id)
+        await invocation.message.reply(
+            f"tree {label} stopped - the next task gets its own number.",
+            mention_author=False,
+        )
+
+    async def tree_list_handler(self, invocation: Invocation):
+        trees = self.todo.list_trees(invocation.message.author.id)
+        if not trees:
+            await invocation.message.reply(
+                "no trees on this list yet - grow one with " "`>tree start <name>`.",
+                mention_author=False,
+            )
+            return
+        lines = []
+        for tree in trees:
+            active = " (growing)" if tree["active"] else ""
+            lines.append(
+                f"🌳 {tree['label']}: '{tree['content']}' - "
+                f"{tree['branches']} branch(es){active}"
+            )
+        lines.append("start or resume with `>tree start <name or number>`.")
+        await invocation.message.reply("\n".join(lines), mention_author=False)
+
+    async def info_handler(self, invocation: Invocation):
+        user = invocation.message.author.id
+        author = invocation.arguments.get("author")
+        author = user if author is None else author
+        lst = invocation.arguments.get("list")
+        lst = lst if lst is not None else ""
+        tz = self._tz_of(user)
+        info = self.todo.task_info(user, author, lst, invocation.arguments["index"])
+
+        lines = [f"task {info['label']}: {info['content']}"]
+        if info["priority"]:
+            lines.append(
+                f"priority: {PRIORITY_EMOTE[info['priority']]} {info['priority']}"
+            )
+        if info["due"] is not None:
+            due_line = (
+                f"due: {due_mod.format_due(info['due'], tz=tz)} "
+                f"({due_mod.render(info['due'], tz=tz)})"
+            )
+            if info["reminded"]:
+                due_line += " · 🔔 pinged"
+            lines.append(due_line)
+        created = info["created_at"]
+        if created is not None:
+            lines.append(f"created: {due_mod.render(created, tz=tz)} ({_ago(created)})")
+        else:
+            lines.append("created: unknown (older than this feature)")
+        if info["edited_at"] is not None:
+            lines.append(
+                f"edited: {info['edited_count']} time(s), last "
+                f"{due_mod.render(info['edited_at'], tz=tz)} "
+                f"({_ago(info['edited_at'])})"
+            )
+        else:
+            lines.append("edited: never")
+        tree = info["tree"]
+        if tree is not None and tree["role"] == "root":
+            active = " (growing)" if tree.get("active") else ""
+            lines.append(f"tree: root of {tree['branches']} branch(es){active}")
+        elif tree is not None:
+            lines.append(
+                f"tree: branch of {tree['label']} " f"'{task_preview(tree['content'])}'"
+            )
+        if info["author_id"] is not None:
+            lines.append(f"added by: <@{info['author_id']}>")
+        lines.append(f"list: '{info['list']}'")
+        await invocation.message.reply("\n".join(lines), mention_author=False)
+
     async def tz_handler(self, invocation: Invocation):
         user = invocation.message.author.id
         value = invocation.arguments.get("set")
@@ -1050,9 +1268,9 @@ class TodoCog(Cog):
                 'due="tomorrow 9am").',
                 is_user_error=True,
             )
-        index = self.todo.add_reminder(user, task, due, self._origin_of(invocation))
+        label = self.todo.add_reminder(user, task, due, self._origin_of(invocation))
         await invocation.message.reply(
-            f"reminder {index} set: '{task_preview(task)}' "
+            f"reminder {label} set: '{task_preview(task)}' "
             f"{due_mod.render(due, tz=tz)} "
             f"(in {due_mod.humanize(due - time.time())}).",
         )

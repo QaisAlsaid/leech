@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from leech.core.error import BaseError
 from leech.core.store import Store, get_store
+import re
 import time
 
 UNSET = object()
@@ -42,6 +43,16 @@ class TodoTask(BaseModel):
     due: float | None = None  # unix seconds
     reminded: bool = False  # ping fired (and was answered or given up)
     origin: TaskOrigin | None = None
+    # v12: stable identity + bookkeeping. `number` is the per-list task
+    # number (1-based, never reused), `branch` is the tree suffix ("a",
+    # "b"...), `tree` marks a tree root. legacy rows get numbers
+    # reconciled from their position on load.
+    number: int | None = None
+    branch: str = ""
+    tree: bool = False
+    created_at: float | None = None  # unix seconds
+    edited_at: float | None = None  # unix seconds
+    edited_count: int = 0
 
     @field_validator("priority", mode="before")
     @classmethod
@@ -59,6 +70,15 @@ class TodoList(BaseModel):
     todo: list[TodoTask] = Field(default_factory=list)
     editors: dict[int, Perms] = Field(default_factory=dict)
     excluded: bool = False  # v10.9: hoard lists stay out of the `>todo lists` counter
+    # v12: `seq` hands out task numbers (kept past everything seen so
+    # numbers are never reused). `tree_root` is the task number of the
+    # armed tree - while it is set, adds grow as branches (46a, 46b...)
+    # of that root instead of taking fresh numbers.
+    seq: int = 0
+    tree_root: int | None = None
+
+    def model_post_init(self, __context) -> None:
+        reconcile_task_numbers(self)
 
 
 class TodoListHandle(BaseModel):
@@ -121,6 +141,52 @@ def reconcile_order(container: TodoContainer) -> None:
     order += [name for name in container.todo if name not in order]
     container.list_order = order
     container.todo = {name: container.todo[name] for name in order}
+
+
+TASK_REF_RE = re.compile(r"^(\d+)([a-z]*)$")
+
+
+def reconcile_task_numbers(lst: TodoList) -> None:
+    """v12: stable per-list task numbers. legacy rows (no `number`) get
+    position+1 on load; numbered rows keep theirs; `seq` is pushed past
+    everything seen so numbers are never reused. creation stamps are
+    backfilled from the task id (a ms epoch) where plausible."""
+    used = {t.number for t in lst.todo if t.number is not None}
+    free = 1
+    for task in lst.todo:
+        if task.number is None:
+            while free in used:
+                free += 1
+            task.number = free
+            used.add(free)
+        if task.created_at is None and task.id is not None and task.id > 10**12:
+            task.created_at = round(task.id / 1000.0, 3)
+    top = max(used, default=0)
+    if lst.seq <= top:
+        lst.seq = top + 1
+
+
+def _branch_next(branch: str) -> str:
+    """bijective base-26: a..z then aa, ab... ("" - the no-branch state
+    - succeeds to "a")."""
+    letters = list(branch)
+    if not letters:
+        return "a"
+    for i in range(len(letters) - 1, -1, -1):
+        if letters[i] != "z":
+            letters[i] = chr(ord(letters[i]) + 1)
+            return "".join(letters)
+        letters[i] = "a"
+    return "a" * (len(letters) + 1)
+
+
+def _branch_last(lst: TodoList, root: int) -> str:
+    branches = [t.branch for t in lst.todo if t.number == root and t.branch]
+    return max(branches, key=lambda b: (len(b), b)) if branches else ""
+
+
+def task_label(task: TodoTask) -> str:
+    return f"{task.number}{task.branch}" if task.number is not None else "?"
 
 
 UNDO_KEEP = 30
@@ -235,8 +301,6 @@ class TodoService:
         return sorted(self.store.items(NS_BACKUP))
 
     def restore_backup(self, name: str) -> int:
-        import re
-
         if not re.fullmatch(r"\d{8}-\d{6}", name or ""):
             raise TodoError(
                 "backup name must look like 20261022-025059. pick one "
@@ -372,7 +436,7 @@ class TodoService:
         priority: str | None = None,
         due: float | None = None,
         origin: TaskOrigin | None = None,
-    ) -> int:
+    ) -> str:
         user_container = self.ensure_container(user)
         active = self.ensure_active_list(Perms(write=True), user_container)
         if len(active.todo) >= MAX_TASKS:
@@ -381,6 +445,7 @@ class TodoService:
         priority = _check_priority(priority)
         due = _check_due(due)
         self._snapshot(user, "add", user_container.active.author_id)
+        number, branch = self._next_slot(active)
         active.todo.append(
             TodoTask(
                 content=task,
@@ -389,45 +454,66 @@ class TodoService:
                 priority=priority,
                 due=due,
                 origin=origin,
+                number=number,
+                branch=branch,
+                created_at=time.time(),
             )
         )
         self._persist(user_container.active.author_id)
-        return len(active.todo) - 1
+        return task_label(active.todo[-1])
 
-    def remove_task(self, user: int, task_index: int) -> str:
+    def remove_task(self, user: int, ref: str) -> tuple[str, str]:
+        """v12: tasks are addressed by stable number (or tree label like
+        46b). returns (label, content) of the removed task."""
         user_container = self.ensure_container(user)
         active = self.ensure_active_list(Perms(remove=True), user_container)
-        self.validate_index(active.todo, task_index)
+        pos = self.resolve_task_index(active, ref)
         self._snapshot(user, "remove", user_container.active.author_id)
-        task = active.todo.pop(task_index)
+        task = active.todo.pop(pos)
+        if task.tree and active.tree_root == task.number:
+            active.tree_root = None  # the armed root itself was removed
         self._persist(user_container.active.author_id)
-        return task.content
+        return task_label(task), task.content
 
-    def remove_tasks(self, user: int, start_task_index: int, end_task_index: int):
+    def remove_tasks(self, user: int, start: int, end: int) -> int:
+        """v12: the range is task NUMBERS (inclusive). tree branches
+        ride their root's number, so a range covering a root takes its
+        whole subtree. returns how many tasks went."""
         user_container = self.ensure_container(user)
         active = self.ensure_active_list(Perms(remove=True), user_container)
-        if start_task_index < 0 or end_task_index >= len(active.todo) or not active.todo:
-            raise TodoError("invalid range for list.")
-        del active.todo[start_task_index: end_task_index + 1]
-        self._snapshot(user, "remove", user_container.active.author_id)
+        if start > end:
+            raise TodoError("the range start must not be after its end.")
+        doomed = [
+            t for t in active.todo if t.number is not None and start <= t.number <= end
+        ]
+        if not doomed:
+            raise TodoError(f"no tasks numbered {start}..{end} in this list.")
+        self._snapshot(user, "removes", user_container.active.author_id)
+        gone = {t.number for t in doomed}
+        active.todo[:] = [
+            t for t in active.todo if t.number is None or not start <= t.number <= end
+        ]
+        if active.tree_root is not None and active.tree_root in gone:
+            active.tree_root = None
         self._persist(user_container.active.author_id)
+        return len(doomed)
 
     def update_task(
         self,
         user: int,
-        task_index: int,
+        ref: str,
         task: str | object = UNSET,
         *,
         priority: str | None | object = UNSET,
         due: float | None | object = UNSET,
-    ) -> str:
+    ) -> tuple[str, str]:
         user_container = self.ensure_container(user)
         active = self.ensure_active_list(
             Perms(remove=True, write=True, read=True), user_container
         )
-        self.validate_index(active.todo, task_index)
+        pos = self.resolve_task_index(active, ref)
         self._snapshot(user, "update", user_container.active.author_id)
-        old = active.todo[task_index]
+        old = active.todo[pos]
         if priority is not UNSET:
             priority = _check_priority(priority)
         if due is not UNSET:
@@ -440,11 +526,14 @@ class TodoService:
                 # a moved deadline re-arms the ping
                 "reminded": False if due is not UNSET else old.reminded,
                 "author_id": user,
+                # v12: edit bookkeeping
+                "edited_at": time.time(),
+                "edited_count": old.edited_count + 1,
             }
         )
-        active.todo[task_index] = updated
+        active.todo[pos] = updated
         self._persist(user_container.active.author_id)
-        return old.content
+        return task_label(old), old.content
 
     def _locate(
         self, owner: int, list_name: str, task_id: int
@@ -474,7 +563,14 @@ class TodoService:
                 raise TodoError("you are not authorized to edit this list.")
         due = _check_due(due)
         self._snapshot(actor, "reschedule", owner)
-        lst.todo[index] = task.model_copy(update={"due": due, "reminded": False})
+        lst.todo[index] = task.model_copy(
+            update={
+                "due": due,
+                "reminded": False,
+                "edited_at": time.time(),
+                "edited_count": task.edited_count + 1,
+            }
+        )
         self._persist(owner)
         return task_preview_of(task)
 
@@ -675,6 +771,7 @@ class TodoService:
         if len(lst.todo) >= MAX_TASKS:
             raise TodoError(f"reminders list is full (max tasks is {MAX_TASKS}).")
         self._snapshot(user, "remind", user)
+        number, branch = self._next_slot(lst)
         lst.todo.append(
             TodoTask(
                 content=content,
@@ -682,10 +779,170 @@ class TodoService:
                 id=self._next_task_id(lst),
                 due=_check_due(due),
                 origin=origin,
+                number=number,
+                branch=branch,
+                created_at=time.time(),
             )
         )
         self._persist(user)
-        return len(lst.todo) - 1
+        return task_label(lst.todo[-1])
+
+    # -- v12: stable numbers, trees, task metadata -----------------------
+
+    def resolve_task_index(self, lst: TodoList, ref) -> int:
+        """a task reference is its number ("12") or its tree label
+        ("46b"). returns the task's position in the list."""
+        raw = str(ref).strip().strip('"').strip("'").lower()
+        match = TASK_REF_RE.match(raw)
+        if not match:
+            raise TodoError(
+                f"'{ref}' is not a task number (like 12, or a tree " "branch like 46b)."
+            )
+        number, branch = int(match.group(1)), match.group(2)
+        for pos, task in enumerate(lst.todo):
+            if task.number == number and task.branch == branch:
+                return pos
+        raise TodoError(
+            f"no task {raw} in this list - the numbers live in `>todo list`."
+        )
+
+    def _next_slot(self, lst: TodoList) -> tuple[int, str]:
+        """the (number, branch) the next add on this list gets: a branch
+        of the armed tree (if its root still exists), else a fresh
+        number."""
+        root = lst.tree_root
+        if root is not None:
+            if any(t.tree and t.number == root for t in lst.todo):
+                return root, _branch_next(_branch_last(lst, root))
+            lst.tree_root = None  # the armed root is gone: fall back
+        number = lst.seq
+        lst.seq = number + 1
+        return number, ""
+
+    def start_tree(self, user: int, name: str) -> tuple[str, bool, str]:
+        """start a new tree (its root task is created with `name`), or
+        resume an existing one by number or name. returns
+        (root_label, resumed, root_content)."""
+        user_container = self.ensure_container(user)
+        active = self.ensure_active_list(Perms(write=True), user_container)
+        raw = str(name).strip()
+        if not raw:
+            raise TodoError(
+                "a tree needs a name - or an existing tree's number or "
+                "name to resume it."
+            )
+        target = None
+        if raw.isdigit():
+            number = int(raw)
+            target = next(
+                (t for t in active.todo if t.tree and t.number == number), None
+            )
+            if target is None and any(t.number == number for t in active.todo):
+                raise TodoError(
+                    f"task {number} is not a tree - trees grow from "
+                    "`>tree start <name>`."
+                )
+        if target is None:
+            target = next(
+                (
+                    t
+                    for t in active.todo
+                    if t.tree and t.content.strip().lower() == raw.lower()
+                ),
+                None,
+            )
+        if target is not None:
+            self._snapshot(user, "tree-resume", user_container.active.author_id)
+            active.tree_root = target.number
+            self._persist(user_container.active.author_id)
+            return task_label(target), True, target.content
+        self._snapshot(user, "tree-start", user_container.active.author_id)
+        number, _branch = self._next_slot(active)
+        active.todo.append(
+            TodoTask(
+                content=raw,
+                author_id=user,
+                id=self._next_task_id(active),
+                number=number,
+                tree=True,
+                created_at=time.time(),
+            )
+        )
+        active.tree_root = number
+        self._persist(user_container.active.author_id)
+        return task_label(active.todo[-1]), False, raw
+
+    def stop_tree(self, user: int) -> str:
+        user_container = self.ensure_container(user)
+        active = self.ensure_active_list(Perms(write=True), user_container)
+        root = active.tree_root
+        if root is None:
+            raise TodoError("no tree is active - start one with `>tree start <name>`.")
+        self._snapshot(user, "tree-stop", user_container.active.author_id)
+        active.tree_root = None
+        self._persist(user_container.active.author_id)
+        return str(root)
+
+    def list_trees(self, user: int) -> list[dict]:
+        user_container = self.ensure_container(user)
+        active = self.ensure_active_list(Perms(read=True), user_container)
+        out = []
+        for task in active.todo:
+            if not task.tree:
+                continue
+            out.append(
+                {
+                    "label": task_label(task),
+                    "content": task.content,
+                    "branches": sum(
+                        1 for t in active.todo if t.number == task.number and t.branch
+                    ),
+                    "active": active.tree_root == task.number,
+                    "created_at": task.created_at,
+                }
+            )
+        return out
+
+    def task_info(self, user: int, author: int, list_ident: str, ref: str) -> dict:
+        """v12: everything known about one task - content, priority, due,
+        creation/edit stamps, tree membership."""
+        name, lst = self.list_tasks(user, author, list_ident)
+        pos = self.resolve_task_index(lst, ref)
+        task = lst.todo[pos]
+        tree: dict | None = None
+        if task.tree:
+            tree = {
+                "role": "root",
+                "label": task_label(task),
+                "content": task.content,
+                "branches": sum(
+                    1 for t in lst.todo if t.number == task.number and t.branch
+                ),
+                "active": lst.tree_root == task.number,
+            }
+        elif task.branch:
+            root = next(
+                (t for t in lst.todo if t.tree and t.number == task.number),
+                None,
+            )
+            tree = {
+                "role": "branch",
+                "label": str(task.number),
+                "content": root.content if root else "(root removed)",
+            }
+        return {
+            "list": name,
+            "label": task_label(task),
+            "content": task.content,
+            "author_id": task.author_id,
+            "priority": task.priority,
+            "due": task.due,
+            "reminded": task.reminded,
+            "created_at": task.created_at,
+            "edited_at": task.edited_at,
+            "edited_count": task.edited_count,
+            "tree": tree,
+        }
 
     # -- per-user prefs (timezone for now) ---------------------------------
 

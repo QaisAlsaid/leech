@@ -26,7 +26,8 @@ It started as a leech: *riding* other bots, running their commands, pressing the
 
 **its own things**
 
-- `>todo` - todo lists with editors and permissions, priorities (🔴 🟠 🟡), and hording lists, due dates with custom timezones and a reminder that pings with `done` / `snooze 30m` / `ignore`, undo, backups
+- `>todo` - todo lists with editors and permissions, priorities (🔴 🟠 🟡), and hording lists, due dates with custom timezones and a reminder that pings with `done` / `snooze 30m` / `ignore`, undo, backups, stable task numbers, and task info with created/edited stamps (`>todo info`)
+- `>tree` - tree todos: start one and every task you add grows as a branch of it (`46a, 46b, 46c...`), stop and the next task gets its own number, resume any tree later by its number or name
 - `>ai` - chat (mentions, replies, or direct `>ai talk`), agentic mode: when a request maps to a command it runs it, with per-user delegation rules (`allow` / `deny` / `ask`, default `ask` - it confirms with you in chat before running anything), personas per channel, a context window it actually remembers, and an audit log of everything it did
 - `>tts` - voice clips and voice clones through the manager queue
 - `>ytdlp` - downloads with lanes (colab / hub), default-lane pinning, queue cancel, cookies override support
@@ -85,7 +86,7 @@ src/leech/
 │                    # userphone · ffmpeg · channel · help · sudo · auth · ping
 ├── deploy/          # supervisor.py, control.py, supabase.sql
 └── scripts/         # migrate_persistent.py, export_store.py, fix_list_order.py, release.py
-tests/               # 126 and counting
+tests/               # 144 and counting
 ```
 
 at the root: `pyproject.toml`, `example.env` (every env var the bot actually reads, grouped and commented), `flake.nix` special for NixOS users.
