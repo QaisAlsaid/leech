@@ -1147,7 +1147,7 @@ class TodoCog(Cog):
                 f"{tree['branches']} branch(es){active}"
             )
         lines.append("start or resume with `>tree start <name or number>`.")
-        await invocation.message.reply("\n".join(lines), mention_author=False)
+        await paginator.paginate(invocation.message, "\n".join(lines), client=self.context.client)
 
     async def info_handler(self, invocation: Invocation):
         user = invocation.message.author.id
